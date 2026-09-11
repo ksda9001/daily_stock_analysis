@@ -376,9 +376,62 @@ ssh -p 882 -L 9899:127.0.0.1:9899 root@172.245.211.211
 
 **B. 独立子域名 + HTTPS（推荐长期使用）**
 
-1. 在 Cloudflare 加一条 A 记录（如 `cow.myfi.cc.cd` → `172.245.211.211`）；
-2. 执行 `bash /root/cowagent/enable-console-domain.sh cow.myfi.cc.cd`
-   （脚本会先备份 nginx 配置，再申请 Let's Encrypt 证书并 reload）。
+⚠️ **顺序不能反：DNS 先，证书后。** Let's Encrypt 的 HTTP-01 校验要求域名
+先能解析到本机，所以没加 DNS 记录时 `certbot` 必然失败。
+
+**第 1 步（必须在 Cloudflare 控制台手工做）**：
+
+| 类型 | 名称 | 内容 | 代理状态 |
+|---|---|---|---|
+| `A` | `cow` | `172.245.211.211` | 橙色云（代理）或灰色云（仅 DNS）**都可以** |
+
+> `myfi.cc.cd` 的 NS 是 Cloudflare（`edna.ns.cloudflare.com` / `rex.ns.cloudflare.com`），
+> **没有通配符记录**，所以每条子域名都要单独加。
+
+**第 2 步：一条命令完成证书扩展 + 重载**
+
+```bash
+bash /root/cowagent/fix-console-domain-cert.sh cow.myfi.cc.cd fi.myfi.cc.cd
+```
+
+它做四件事：验证域名**真的**能打到本机 nginx → `certbot --expand` 把 cow 并进
+fi 的证书 lineage → `nginx -t` → `systemctl reload nginx`。
+
+> **为什么用 `--expand` 而不是新签一张证书？**
+> `fi` 和 `cow` 共用一张证书后，**现有 nginx 配置一行都不用改**——
+> 它本来就指向 `/etc/letsencrypt/live/fi.myfi.cc.cd/`。`--expand` 保留 lineage 名，
+> 只往 SAN 里加域名，证书路径不变。
+> 若走「给 cow 单独签一张」，就得同步把配置里的 `ssl_certificate` 改成
+> `live/cow.myfi.cc.cd/`，多一个容易忘的步骤。
+
+> **别用「解析到 172.245.211.211」来判断 DNS 是否就绪**：若走 Cloudflare 代理，
+> 解析出来是 **Cloudflare 的 IP**，那样判断会误报失败。
+> `fix-console-domain-cert.sh` 用的是决定性判据——往 webroot 放一个探测文件，
+> 再从公网 `http://<域名>/.well-known/acme-challenge/<file>` 取回来，
+> 取到了才继续。两种代理模式都能正确判断。
+
+**排查：nginx 配置写了但访问不了**
+
+按这个顺序查，能一步定位：
+
+```bash
+nginx -t                                      # 1. 配置语法
+systemctl status nginx --no-pager | head -5   # 2. 服务在跑
+ps -eo pid,lstart,args | grep 'nginx: worker' # 3. worker 是否晚于配置修改时间（判断有没有 reload）
+getent hosts <域名>                            # 4. DNS 是否存在  ← 最常被忽略
+openssl x509 -in /etc/letsencrypt/live/<名>/fullchain.pem -noout -text \
+  | grep -A1 'Subject Alternative Name'       # 5. 证书 SAN 是否覆盖该域名
+```
+
+> **只在服务器上测是不够的**：配置没 reload 时，用
+> `curl -H 'Host: <域名>' http://127.0.0.1/` 仍可能因为**别的站点**兜底而返回
+> 看似正常的结果。要确认某个 server 块真的生效，得看
+> **worker 进程启动时间是否晚于配置文件修改时间**。
+>
+> 另外注意 `default` 站点若写成 `return 301 https://$host$request_uri`，
+> 那么**任何** Host 头都会被 301，会掩盖「目标站点没生效」的事实。
+> 本项目里 `default` 是 `try_files ... =404`，所以 301 确实来自目标站点——
+> 这个前提成立时，301 才能作为证据。
 
 > 子路径代理（`/cow/`）**不可行**：控制台的 API 调用是绝对路径
 > （`fetch('/config')`、`fetch('/api/agents')`、`fetch('/message')`…），
