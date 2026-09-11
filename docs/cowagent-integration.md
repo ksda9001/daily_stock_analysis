@@ -13,6 +13,10 @@
 - **DSA 拥有**：数据、分析、选股、决策信号、用户与配额
 - **中间的 MCP 服务器**：只做协议翻译，无状态
 
+> 本文讲**怎么接**。想看**生产上实际怎么部署的**（镜像怎么构建、容器怎么编排、
+> 踩了哪些坑），看 [`docs/deployment-server.md`](./deployment-server.md)。
+> 两篇的关系：本文是接入说明，那篇是运维手册。
+
 ---
 
 ## 1. 为什么非要用 CowAgent
@@ -76,9 +80,25 @@ pip install -r mcp_server/requirements.txt
 
 ### 3.1 先自检
 
+MCP 服务器支持两种凭据模式（`mcp_server/client.py`）：
+
+| 模式 | 环境变量 | 说明 |
+|---|---|---|
+| **Token**（推荐） | `DSA_API_TOKEN` | 用 `POST /api/v1/tenancy/auth/token` 事先签发，请求时直接带 |
+| **账号密码** | `DSA_USERNAME` + `DSA_PASSWORD` | 首次请求时**惰性换取** Token，之后缓存 |
+
+给**人**用（每人一个账号）建议用 Token；给**服务账号**用（如 CowAgent 这种
+一个实例跑一个身份的）用账号密码更省事 —— 密码改了会自动重新换取。
+
 ```bash
+# 模式一：Token
 DSA_BASE_URL=http://127.0.0.1:8000 \
 DSA_API_TOKEN=<alice 的 token> \
+python -m mcp_server --check
+
+# 模式二：账号密码
+DSA_BASE_URL=http://127.0.0.1:8000 \
+DSA_USERNAME=alice DSA_PASSWORD=<强密码> \
 python -m mcp_server --check
 ```
 
@@ -93,21 +113,32 @@ python -m mcp_server --check
 
 **这一步不通就不要往下走** —— 后面 CowAgent 报的错都会比这里难查。
 
+> `--check` 需要**真实凭据**，所以**不能**放进 Dockerfile 的构建步骤里
+> （构建期没有凭据，会直接 exit 2）。镜像里只做 `import` 冒烟测试，
+> 真正的连通性验证放在容器起来之后。
+
 ---
 
 ## 4. 配置 CowAgent
 
-CowAgent 读 `~/cow/mcp.json`，格式与 Claude Desktop / Cursor 一致。
+CowAgent 读 `~/cow/mcp.json`，格式与 Claude Desktop / Cursor 基本一致。
+
+**生产上实际用的配置**（Docker 部署，DSA 与 CowAgent 同在一个 `dsa-network`）：
 
 ```json
 {
   "mcpServers": {
     "dsa": {
-      "command": "python",
+      "command": "/usr/local/bin/python",
       "args": ["-m", "mcp_server"],
       "env": {
-        "DSA_BASE_URL": "http://127.0.0.1:8000",
-        "DSA_API_TOKEN": "<alice 的 token>"
+        "PATH": "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PYTHONPATH": "/opt/dsa-mcp",
+        "PYTHONUNBUFFERED": "1",
+        "DSA_BASE_URL": "http://dsa-server:8000",
+        "DSA_USERNAME": "cowagent",
+        "DSA_PASSWORD": "<服务账号密码>",
+        "DSA_MCP_LOG_LEVEL": "INFO"
       },
       "tool_name_prefix": "dsa_"
     }
@@ -115,34 +146,50 @@ CowAgent 读 `~/cow/mcp.json`，格式与 Claude Desktop / Cursor 一致。
 }
 ```
 
-### 三个必须注意的点
+### 四个必须注意的点
 
-**① `env` 必须显式写。**
+**① `env` 必须显式写，一个都不能少。**
 子进程**不会**继承你 `export` 的环境变量 —— 实测过：父进程设了
 `DSA_BASE_URL`，服务器启动后仍打印默认的 `http://127.0.0.1:8000`。
-所以 Token 和地址只能写在 `env` 里。
+更隐蔽的是 **`PATH` 也要写**：不写的话子进程可能找不到 `python`
+（或者说找不到你 `command` 里那个解释器依赖的任何东西）。
 
-**② 加 `tool_name_prefix`。**
+**② CowAgent 的 `mcp.json` 没有 `cwd` 字段。**
+这是个坑。`command: "python"` + `args: ["-m", "mcp_server"]` 依赖**工作目录
+是仓库根目录**，但 CowAgent 不提供设置工作目录的字段 —— 写进去会被忽略。
+
+所以 `python -m mcp_server` 必须靠 **`PYTHONPATH`** 来找到包：
+
+```
+"env": { "PYTHONPATH": "/opt/dsa-mcp" }     # mcp_server/ 的父目录
+```
+
+（`server.py` 也处理了「作为脚本直接运行」的情况，会自己修正 `sys.path`，
+但那只在 `args: ["/abs/path/server.py"]` 这种写法下生效。）
+
+**③ 加 `tool_name_prefix`。**
 26 个工具里有 `get_watchlist`、`get_usage_summary` 这种通用名，很容易和
 CowAgent 内置工具或其他 MCP 服务器撞名。加 `dsa_` 前缀后工具名变成
 `dsa_add_to_watchlist`，不会冲突。
 
-**③ `cwd` 要对。**
-`command: "python"` + `args: ["-m", "mcp_server"]` 依赖**工作目录是仓库根目录**。
-如果 CowAgent 不保证这一点，改用绝对路径：
-
-```json
-{
-  "command": "/usr/bin/python3",
-  "args": ["/abs/path/to/daily_stock_analysis/mcp_server/server.py"]
-}
-```
-
-`server.py` 已处理「作为脚本直接运行」的情况（会自己修正 `sys.path`）。
+**④ 容器内互访用容器名，不要用 `127.0.0.1`。**
+CowAgent 容器里的 `127.0.0.1` 是它自己，不是 DSA。同网络下直接写服务名：
+`http://dsa-server:8000`。前提是两个容器在**同一个 docker network** 里。
 
 > 改完 `mcp.json` 后**下一条消息**才会生效（CowAgent 有热重载）。
-> Docker 部署：宿主机 `./cow` 会挂到容器内 `/home/agent/cow`，把 `mcp.json`
-> 丢进宿主机 `./cow/` 即可。
+> Docker 部署：宿主机 `./cow` 挂到容器内 `/home/agent/cow`，把 `mcp.json`
+> 丢进宿主机 `./cow/` 即可，**不用重启容器**。
+
+### 验证 MCP 真的通了
+
+看 CowAgent 启动日志（`docker logs cowagent | grep MCP`）：
+
+```
+[MCP] Server 'dsa' ready — 26 tool(s)
+1/1 server(s) ready, 26 tool(s) available
+```
+
+`26 tool(s)` 就是对的。如果只有 `0`，说明子进程没起来 —— 九成是 ① 或 ②。
 
 ---
 
@@ -183,18 +230,60 @@ DSA 侧不需要信任调用方传来的任何用户标识 —— 身份完全�
 服务端据此设置 `tenant_id`，数据隔离在 SQLAlchemy 会话层强制生效。
 **即使 LLM 被 prompt injection 诱导去查别人的数据，也查不到。**
 
-### ⚠️ 需要你确认的一件事
+### CowAgent 支持「每个 Agent 独立 MCP 配置」吗？——**支持**（已实测源码）
 
-CowAgent 的 `mcp.json` 是**全局**的（`~/cow/mcp.json`）。这意味着：
+这条之前标注为「未实测」，现在已在容器里读了实现，结论明确。
 
-- 如果 CowAgent 只有**一个 Agent 实例**，那所有微信用户共用同一个 Token
-  → 实际上退化成单用户，所有人都看到同一个账号的数据；
-- 要做到「一个微信用户 = 一个 DSA 账号」，需要**每个用户一个 CowAgent 实例**，
-  各自有自己的 `~/cow/mcp.json`。
+关键在 `common/state_dir.py` 的 `_shared_or_own()`：
 
-**这一点我没有实测**（本仓库没有 CowAgent 环境，我只核对了它的官方文档）。
-请在接入前确认 CowAgent 是否支持「每个 Agent 独立配置 MCP」。
-若不支持，可选方案：多实例部署，或用一层薄路由按用户转发。
+```python
+def _shared_or_own(identity, base, *parts):
+    own = _agent_base(identity, base).joinpath(*parts)   # <该 Agent workspace>/mcp.json
+    if own.exists():
+        return own                                       # 有就用自己的
+    return shared_root().joinpath(*parts)                # 没有就回落共享的
+```
+
+设计意图写得很直白（`tool_manager.py` 类注释）：
+
+> One instance per Agent workspace. ... A single process-wide instance would
+> let the first Agent to start decide which MCP servers exist, **hand its tools
+> (and their credentials) to every other Agent**, and leave their own servers
+> permanently unloaded.
+
+也就是说：
+
+- `ToolManager` **每个 Agent workspace 一个实例**，各自加载自己的 `mcp.json`；
+- **opt-in 方式是「文件存在」而非「配置开关」**：某个 Agent 需要私有 MCP，
+  就在**它自己的 workspace 下**放一个 `mcp.json`；没有就继续读共享的那份；
+- 默认 Agent 的 workspace 就是共享根，所以**单 Agent 部署下两者是同一个路径**，
+  不需要额外配置。
+
+于是「一个微信用户 = 一个 DSA 账号」是**可以做到**的：
+给每个用户建一个 CowAgent Agent，在各自 workspace 下放指向自己 Token 的 `mcp.json`。
+
+> ⚠️ **一个会把人带偏的坑**：默认 Agent 的 workspace 是运行时用户的 `$HOME/cow`。
+> 这个镜像的 entrypoint 会 `su agent` **降权**后再启动主进程，所以实际是
+> `/home/agent/cow`。但如果你用 `docker exec`（默认 root）进去看，
+> `HOME=/root`，解析出来是 `/root/cow` —— **那个目录根本不存在**，
+> 会让人误以为配置放错了位置。
+>
+> 排查时务必带 `-u agent`：
+> ```bash
+> docker exec -u agent cowagent python -c \
+>   "import sys;sys.path.insert(0,'/app');from common.state_dir import mcp_config_file as f;print(f())"
+> # → /home/agent/cow/mcp.json
+> ```
+
+### 另外两个从源码里翻出来的有用选项
+
+| 选项 | 位置 | 作用 |
+|---|---|---|
+| `inherit_full_env: true` | `mcp.json` 里**每个 server** 一项 | 恢复完整环境变量继承（默认只传安全变量 + 你写的 `env`，避免把 Agent 自己的 API Key 泄给子进程）。**敏感名仍会被剔除** |
+| `mcp_stdio_command_allowlist` | CowAgent 的 `config.json` | 限制 stdio MCP 能拉起哪些可执行文件（如 `["python","npx"]`）。**默认空 = 不限制**，为兼容既有配置 |
+
+如果嫌 `env` 里连 `PATH` 都要手写太啰嗦，可以改用 `inherit_full_env: true` —— 但要多想一步：
+这样 MCP 子进程就能看到 CowAgent 自己的 `DEEPSEEK_API_KEY` 等变量了。
 
 ---
 
@@ -223,13 +312,37 @@ DSA 自己的 12 个渠道（企业微信机器人、飞书、Telegram、邮件�
 都是**按用户可配**的（`update_my_settings` 就能改）。
 个人微信走 CowAgent，企业微信群机器人继续走 DSA 原生渠道，互不冲突。
 
-### 微信通道的几个事实（来自官方文档）
+### 微信通道的几个事实
 
 - 走**腾讯官方 API**，不是逆向协议 —— 不存在「封号风险」那套说法
 - 机器人以独立联系人「**微信ClawBot**」出现，不影响正常使用
-- 凭据存 `~/.weixin_cow_credentials.json`，重启免扫码
 - 会话过期（errcode `-14`）会自动清凭据并重新出二维码，无需人工干预
-- 要求微信客户端 **8.0.69+**
+- 要求微信客户端 **8.0.69+**（旧版本扫码后不出现联系人）
+
+**凭据落在哪 —— 取决于有没有设 `COW_DATA_DIR`：**
+
+| `COW_DATA_DIR` | 凭据路径 | 容器重建后 |
+|---|---|---|
+| **已设**（推荐） | `<COW_DATA_DIR>/weixin_credentials.json` | 在挂载卷里，**免扫码** |
+| 未设 | `~/.weixin_cow_credentials.json` | 在容器可写层，**重建即丢，要重扫** |
+
+本项目的部署设了 `COW_DATA_DIR=/home/agent/.cow` 并挂载了 `./cow-data`，
+所以实际路径是：
+
+```
+/home/agent/.cow/weixin_credentials.json   →  宿主机 ./cow-data/weixin_credentials.json
+```
+
+验证（未扫码时不存在是正常的）：
+
+```bash
+docker exec -u agent cowagent python -c \
+  "import sys;sys.path.insert(0,'/app');from config import get_weixin_credentials_path as g;print(g())"
+```
+
+> 二维码有效期约 2 分钟，过期会自动刷新出新码 —— 所以**要取最新的那张**，
+> 别用几分钟前截的图。取码脚本见
+> [`docs/deployment-server.md`](./deployment-server.md) §8「控制台访问」。
 
 ---
 
@@ -238,8 +351,11 @@ DSA 自己的 12 个渠道（企业微信机器人、飞书、Telegram、邮件�
 | 现象 | 排查 |
 |---|---|
 | CowAgent 里看不到任何 `dsa_*` 工具 | `~/cow/mcp.json` 是否存在且是合法 JSON；改动是否在下一条消息后才生效 |
-| 工具报 `missing_credentials` | `env` 里没写 `DSA_API_TOKEN`（**子进程不继承父进程环境变量**） |
-| 工具报 `connection_error` | `DSA_BASE_URL` 写错，或 DSA 没起；先在宿主机 `curl` 一下 |
+| `mcp.json` 明明放了却没生效 | **路径不对**。它是相对「该 Agent 的 workspace」解析的，不是相对任意 `~`。用 `docker exec -u agent` 打印 `mcp_config_file()` 核对真实路径（见 §6 的坑） |
+| 工具报 `missing_credentials` | `env` 里没写 `DSA_API_TOKEN`，或没写 `DSA_USERNAME`+`DSA_PASSWORD`（**子进程不继承父进程环境变量**） |
+| 子进程起不来 / `command not found` | `env` 里漏了 `PATH`（默认不继承完整环境） |
+| `No module named mcp_server` | 漏了 `PYTHONPATH`，或写错了目录（应为 `mcp_server/` 的**父目录**） |
+| 工具报 `connection_error` | `DSA_BASE_URL` 写错，或 DSA 没起。**容器内要用服务名** `http://dsa-server:8000`，不能用 `127.0.0.1`；并确认两容器在同一 network |
 | 报 `multiuser_disabled` | DSA 没开 `DSA_MULTIUSER_ENABLED=true` |
 | 报 `invalid_credentials` | 密码错，或用户被禁用 |
 | 报 401 但 Token 刚签发 | Token 被撤销（改密码 / revoke-tokens 会自增 `token_version`） |
@@ -249,6 +365,14 @@ DSA 自己的 12 个渠道（企业微信机器人、飞书、Telegram、邮件�
 
 排障顺序固定：**先在命令行 `--check`，再查 CowAgent 配置**。
 命令行不通就与 CowAgent 无关。
+
+想直接看 MCP 有没有起来，最省事的一条命令：
+
+```bash
+docker logs cowagent 2>&1 | grep -i mcp
+# 期望： [MCP] Server 'dsa' ready — 26 tool(s)
+#        [ToolManager] MCP loading complete: 1/1 server(s) ready, 26 tool(s) available
+```
 
 ---
 
@@ -286,7 +410,7 @@ python scripts/e2e_mcp_chain.py --verbose   # 失败时自动打印服务端日�
 
 诚实划一下边界，免得踩坑时找错方向。
 
-**已实测：**
+**已实测（本地，无 CowAgent 环境）：**
 
 - **MCP → DSA 全链路（23/23 断言通过）**：真实服务 + 真实 stdio + 真实 HTTP + 真实 Token
 - **跨用户隔离在 MCP 层依然成立**：bob 拿自己的 Token 看不到 alice 的自选
@@ -297,9 +421,29 @@ python scripts/e2e_mcp_chain.py --verbose   # 失败时自动打印服务端日�
 - 每个工具的「方法 + 路径 + 载荷」都有测试覆盖（40 个用例）
 - 自选股确实走按用户端点，不会写到全局配置
 
-**未实测（需你确认）：**
+**已实测（生产服务器，CowAgent 真实部署）：**
 
-- CowAgent 本身没跑过 —— `mcp.json` 格式来自其官方文档，非实测
-- CowAgent 是否支持「每个 Agent 独立 MCP 配置」（决定能否做到一用户一租户）
-- CowAgent 的入站消息 API（方案 B 的前提）
-- DSA 在远程沙箱上的实际连通性
+- **CowAgent 侧 `[MCP] Server 'dsa' ready — 26 tool(s)`**，
+  `1/1 server(s) ready, 26 tool(s) available` —— MCP 子进程真实拉起、握手成功
+- **容器内 stdio 端到端 6/6 通过**：`whoami` → `cowagent`；
+  `get_watchlist` 继承到全局列表；`get_my_usage` 归属到 `tenant_id: 2`
+- **HTTP 侧多租户 12/12 通过**：签发 Token、`/auth/me`、自选增删、
+  用量归属、无 Token → 401、非管理员 → 403
+- **`mcp.json` 的 workspace 解析**（读源码 + 运行时打印双重确认）
+- **微信凭据路径**：`COW_DATA_DIR` 已设 → `/home/agent/.cow/weixin_credentials.json`
+- **`env` 不写 `PATH` 会起不来**、**没有 `cwd` 字段**（只能靠 `PYTHONPATH`）
+- CowAgent **支持每个 Agent 独立 `mcp.json`**（源码确认，见 §6）
+
+**仍未实测（需你确认）：**
+
+- **微信通道本身还没登录** —— 二维码已生成待扫；扫码后
+  「机器人是否出现在微信联系人里、能否收发消息」需要你实际试一下
+- CowAgent 的**入站消息 API**（§7 方案 B 的前提）—— 官方文档没写，
+  没去翻源码确认它有没有对外发消息的 HTTP 接口
+- **多 Agent 各自独立 MCP 配置**虽然源码支持，但**没实际建第二个 Agent 验证过**
+  （单 Agent 部署下走的是共享回落分支）
+
+---
+
+> 生产部署的完整拓扑、镜像构建、回滚步骤、以及**绝对不能碰的 Tailscale 策略路由**，
+> 见 [`docs/deployment-server.md`](./deployment-server.md)。

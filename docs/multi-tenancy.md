@@ -285,10 +285,27 @@ Scheduler (schedule 库, 30s 轮询)
 | GET | `/settings` | 已登录 | 读自己的配置（敏感项掩码） |
 | PUT | `/settings` | 已登录 | 写自己的配置 |
 | DELETE | `/settings` | 已登录 | 重置部分配置，回落到全局 `.env` |
+| GET | `/watchlist` | 已登录 | 读自己的自选股（首次读取继承全局 `STOCK_LIST`） |
+| POST | `/watchlist` | 已登录 | 加入一只股票（**在继承列表上追加**，不是替换） |
+| PUT | `/watchlist` | 已登录 | 整体替换自己的自选股 |
+| DELETE | `/watchlist` | 已登录 | 清空个人自选，回落到全局 `STOCK_LIST` |
+| DELETE | `/watchlist/{stock_code}` | 已登录 | 从自选移除一只股票 |
 | GET | `/usage` | 已登录 | 自己的 LLM 用量 |
 | GET | `/usage/{id}` | 管理员 | 指定用户用量 |
 | GET | `/scheduler/users` | 管理员 | 参与定时分析的用户及其调度配置 |
 | GET | `/audit` | 管理员 | 租户操作审计日志 |
+
+> **为什么自选股必须走 `/api/v1/tenancy/watchlist` 而不是上游的
+> `/api/v1/stocks/watchlist/add`？**
+>
+> 上游那个接口最终调用 `SystemConfigService` 写入**进程级全局** `STOCK_LIST`，
+> 也就是所有用户共享同一份。多用户场景下 A 加一只股票，B 的自选会跟着变，
+> 而且下一次分析 B 会莫名其妙多分析一只股票。租户端点的写入落在
+> `dsa_user_settings` 里按 `tenant_id` 隔离，不会互相污染。
+>
+> 因此 `mcp_server` 的自选股工具**全部**指向 `/api/v1/tenancy/watchlist`，
+> 并在 `tests/test_mcp_server.py` 里有一条断言专门守住这一点：
+> 一旦有人把它改回上游路径，测试立即失败。
 
 ---
 
