@@ -386,7 +386,26 @@ ssh -p 882 -L 9899:127.0.0.1:9899 root@172.245.211.211
 
 **微信登录**：控制台 → Channels → Connect Channel → WeChat → 扫码。
 或用 `bash /root/cowagent/show-wechat-qr.sh` 把当前二维码渲染成 PNG。
-二维码有效期约 2 分钟、自动刷新；登录成功后凭据写入 `cow-data/weixin_credentials.json`。
+
+⚠️ **二维码不是无限自动刷新的**（实测 `channel/weixin/weixin_channel.py`）：
+
+```
+QR_LOGIN_TIMEOUT_S = 480     # 整个登录窗口 8 分钟
+QR_MAX_REFRESHES   = 10      # 最多刷新 10 次
+```
+
+二维码本身约 2 分钟过期、会自动换新，但**刷新满 10 次或总时长到 480s 后通道放弃**
+（日志：`QR login timed out` / `请通过控制台重新接入`），此时**必须重启容器**才重开窗口。
+
+`show-wechat-qr.sh` 已处理这一点：它会检测窗口是否已死，死了就自动
+`docker restart cowagent` 再等新码；已登录则直接提示无需扫码。
+**所以不要提前截图存着，要扫的时候现跑。**
+
+> 脚本里有个容易写错的点：`docker restart` **不会清空日志**，旧二维码链接还在
+> `docker logs` 里。若只判断「日志里有没有二维码链接」，重启后会立刻匹配到**旧链接**、
+> 渲染出已过期的码。必须比对**链接条数是否增加**。
+
+登录成功后凭据写入 `cow-data/weixin_credentials.json`。
 会话过期（errcode `-14`）会自动清凭据并重新发起扫码，无需人工干预。
 
 ---

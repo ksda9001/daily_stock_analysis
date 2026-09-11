@@ -340,9 +340,21 @@ docker exec -u agent cowagent python -c \
   "import sys;sys.path.insert(0,'/app');from config import get_weixin_credentials_path as g;print(g())"
 ```
 
-> 二维码有效期约 2 分钟，过期会自动刷新出新码 —— 所以**要取最新的那张**，
-> 别用几分钟前截的图。取码脚本见
-> [`docs/deployment-server.md`](./deployment-server.md) §8「控制台访问」。
+> ⚠️ **首次登录的二维码不是「无限自动刷新」的**（实测
+> `channel/weixin/weixin_channel.py`）：
+>
+> ```
+> QR_LOGIN_TIMEOUT_S = 480     # 整个登录窗口 8 分钟
+> QR_MAX_REFRESHES   = 10      # 最多刷新 10 次
+> ```
+>
+> 二维码本身约 2 分钟过期、会自动换新的，但**刷新满 10 次或总时长到 480s 后，
+> 通道会放弃**（日志：`QR login timed out` / `二维码登录超时，请通过控制台重新接入`），
+> 此时**必须重启容器**才会重新开一个窗口。
+>
+> 所以**不要**提前截图放着 —— 要扫的时候现取。
+> 取码脚本会自动处理「窗口已死」的情况（检测到超时就重启容器开新窗口）：
+> 见 [`docs/deployment-server.md`](./deployment-server.md) §8「控制台访问」。
 
 ---
 
