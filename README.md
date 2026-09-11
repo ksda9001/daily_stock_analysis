@@ -58,6 +58,9 @@ pip install -r mcp_server/requirements.txt
 
 # 自检：连通性 + 鉴权 + 身份
 DSA_BASE_URL=http://127.0.0.1:8000 DSA_API_TOKEN=<token> python -m mcp_server --check
+
+# 端到端联调：起真实服务 + 真实 MCP，验证跨用户隔离（23 项断言）
+python scripts/e2e_mcp_chain.py
 ```
 
 CowAgent 侧配置（`~/cow/mcp.json`）：

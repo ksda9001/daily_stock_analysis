@@ -38,6 +38,15 @@ python -m mcp_server --check
 会依次验证「能否连上 → Token 是否有效 → 对应哪个账号 → 自选股读得到吗」，
 全部输出到 stderr。**排障先跑这个。**
 
+## 端到端联调
+
+```bash
+python scripts/e2e_mcp_chain.py
+```
+
+起真实 DSA + 真实 stdio + 真实 HTTP，验证跨用户隔离（23 项断言）。
+改了 MCP 或租户代码后先跑这个。
+
 ## 启动
 
 ```bash
