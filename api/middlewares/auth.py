@@ -35,13 +35,24 @@ def _path_exempt(path: str) -> bool:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Require valid session for /api/v1/* when auth is enabled."""
+    """Require valid session for /api/v1/* when auth is enabled.
+
+    多用户模式（``DSA_MULTIUSER_ENABLED=true``）下本中间件**主动让行**：
+    鉴权改由 :class:`src.tenancy.middleware.TenancyContextMiddleware` 统一
+    负责。两套规则同时生效会互相打架——例如多用户模式要求按用户身份，
+    而这里只认管理员会话，会把普通用户全部挡在门外。
+    """
 
     async def dispatch(
         self,
         request: Request,
         call_next: Callable,
     ):
+        from src.tenancy.context import multiuser_enabled
+
+        if multiuser_enabled():
+            return await call_next(request)
+
         if not is_auth_enabled():
             return await call_next(request)
 

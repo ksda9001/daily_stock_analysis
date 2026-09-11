@@ -731,6 +731,29 @@ def _run_auto_backtest(config: Config) -> None:
         logger.warning(f"自动回测失败（已忽略）: {exc}")
 
 
+def _apply_tenant_config(config: Config) -> Config:
+    """多租户：返回叠加了当前用户设置的 ``Config`` 副本。
+
+    上游所有 ``config.<attr>`` 读取点（通知发送、报告渲染、Agent 工具……）
+    因此无需任何修改即可按用户生效——改动面收敛到这一个函数。
+
+    多用户模式未启用、或当前没有用户上下文时，原样返回传入的 config。
+    """
+    try:
+        from src.tenancy.context import current_user_id, multiuser_enabled
+        from src.tenancy.settings import apply_user_overrides
+
+        if not multiuser_enabled():
+            return config
+        tenant_id = current_user_id()
+        if tenant_id is None:
+            return config
+        return apply_user_overrides(config, tenant_id)
+    except Exception as exc:  # noqa: BLE001 - 配置叠加失败必须回退而不是中断分析
+        logger.warning("应用用户级配置失败，回退到全局配置: %s", exc)
+        return config
+
+
 def run_full_analysis(
     config: Config,
     args: argparse.Namespace,
@@ -747,6 +770,9 @@ def run_full_analysis(
     ``analysis_targets`` 与 ``stock_codes`` 对齐，携带结构化分析目标
     （指数目标用于推导 market=cn 与能力矩阵）。
     """
+    # 多租户：把当前用户的自选股 / 通知渠道 / 报告偏好叠加到配置上。
+    config = _apply_tenant_config(config)
+
     # Portfolio resolution is its own CLI contract boundary. A broker import
     # failure must reach the one-shot caller, while all later work keeps the
     # existing run_full_analysis return-value semantics.

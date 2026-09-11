@@ -39,6 +39,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _sync_tenancy_system_owner() -> None:
+    """多租户：把管理员密码摘要镜像到系统属主用户行。
+
+    未启用多用户模式时是空操作。任何失败都只记日志——密码同步不应
+    影响管理员登录这一核心路径。
+    """
+    try:
+        from src.tenancy.context import multiuser_enabled
+
+        if not multiuser_enabled():
+            return
+        from src.tenancy.schema import sync_system_owner_password
+
+        sync_system_owner_password()
+    except Exception as exc:  # noqa: BLE001 - 登录路径不能被同步失败阻断
+        logger.warning("[tenancy] failed to sync system owner password: %s", exc)
+
+
+
 class LoginRequest(BaseModel):
     """Login request body. For first-time setup use password + password_confirm."""
 
@@ -416,6 +435,13 @@ async def auth_login(request: Request, body: LoginRequest):
             )
 
     clear_rate_limit(ip)
+
+    # 多租户：把管理员密码摘要同步到系统属主用户行，这样管理员也能用
+    # 同一套用户名密码通过 /api/v1/tenancy/auth/token 换取 Bearer Token
+    # （供 CowAgent 等自动化客户端使用），而不必再单独设置一次密码。
+    # 未启用多用户时该调用是空操作。
+    _sync_tenancy_system_owner()
+
     session_val = create_session()
     if not session_val:
         return JSONResponse(

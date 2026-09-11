@@ -3038,6 +3038,23 @@ class Config:
         origins = route_deployment_origins(self.llm_model_list, primary_model)
         return not origins.is_hermes_only
 
+    def _tenant_stock_list(self) -> Optional[List[str]]:
+        """多租户：返回当前用户的自选股；无用户上下文或未配置时返回 ``None``。
+
+        这个方法本身不抛异常——配置读取失败应该回退到全局 ``.env``，
+        而不是让整轮分析失败。
+        """
+        try:
+            from src.tenancy.context import current_user_id, multiuser_enabled
+            from src.tenancy.settings import effective_stock_list
+
+            if not multiuser_enabled():
+                return None
+            return effective_stock_list(current_user_id())
+        except Exception as exc:  # noqa: BLE001 - 回退到全局配置
+            logger.warning("读取用户自选股失败，回退到全局 STOCK_LIST: %s", exc)
+            return None
+
     def refresh_stock_list(self) -> None:
         """
         热读取 STOCK_LIST 环境变量并更新配置中的自选股列表
@@ -3045,7 +3062,16 @@ class Config:
         支持两种配置方式：
         1. .env 文件（本地开发、定时任务模式） - 修改后下次执行自动生效
         2. 系统环境变量（GitHub Actions、Docker） - 启动时固定，运行中不变
+
+        多租户：当前上下文绑定到某个用户时，优先使用该用户在
+        ``dsa_user_settings`` 中配置的自选股，实现「每个用户一份自选股」。
         """
+        # 多租户优先：用户在 WebUI 里维护的自选股覆盖全局 .env
+        tenant_list = self._tenant_stock_list()
+        if tenant_list:
+            self.stock_list = tenant_list
+            return
+
         # 优先从 .env 文件读取最新配置，这样即使在容器环境中修改了 .env 文件，
         # 也能获取到最新的股票列表配置
         env_file = os.getenv("ENV_FILE")

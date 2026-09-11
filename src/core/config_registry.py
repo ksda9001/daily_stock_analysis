@@ -80,6 +80,13 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "PROXY_HOST",
     "PROXY_PORT",
     "SEARXNG_TIMEOUT_SECONDS",
+    # 多租户（本 fork 新增）：这些是**启动期**基础设施开关。
+    # 运行中修改它们不会重建数据库结构、不会重新武装租户守卫、
+    # 也不会撤销已签发的 Token，因此刻意不允许在 Web 设置页编辑。
+    "DSA_MULTIUSER_ENABLED",
+    "DSA_SYSTEM_TENANT_ID",
+    "DSA_API_TOKEN_TTL_SECONDS",
+    "DSA_TENANCY_STRICT_RAW_SQL",
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {

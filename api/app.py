@@ -168,6 +168,7 @@ from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.schemas.common import HealthResponse
 from src.auth import is_auth_enabled
+from src.tenancy.install import install_tenancy
 from src.data.stock_index_loader import find_existing_stock_index_path
 from src.services.system_config_service import SystemConfigService
 from src.services.runtime_scheduler import (
@@ -375,7 +376,15 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     )
 
     add_auth_middleware(app)
-    
+
+    # ============================================================
+    # 多租户（在 ADMIN_AUTH_ENABLED 之外提供按用户的鉴权与数据隔离）
+    # ============================================================
+    # 注意顺序：必须在 add_auth_middleware 之后注册，这样租户中间件位于
+    # Starlette 中间件栈更外层，先于上游管理员中间件解析身份。
+    # DSA_MULTIUSER_ENABLED 未开启时本调用是空操作，不改变上游行为。
+    install_tenancy(app)
+
     # ============================================================
     # 注册路由
     # ============================================================

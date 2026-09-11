@@ -314,6 +314,8 @@ class ScreeningRun(Base):
 
     __tablename__ = 'screening_runs'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(64), nullable=False, unique=True, index=True)
     strategy = Column(String(64), nullable=False, index=True)
@@ -343,6 +345,8 @@ class AnalysisHistory(Base):
     """
     __tablename__ = 'analysis_history'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     # 关联查询链路
@@ -404,6 +408,8 @@ class BacktestResult(Base):
 
     __tablename__ = 'backtest_results'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     analysis_history_id = Column(
@@ -472,6 +478,8 @@ class BacktestSummary(Base):
 
     __tablename__ = 'backtest_summaries'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     scope = Column(String(16), nullable=False, index=True)  # overall/stock
@@ -527,6 +535,8 @@ class PortfolioAccount(Base):
 
     __tablename__ = 'portfolio_accounts'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     owner_id = Column(String(64), index=True)
     name = Column(String(64), nullable=False)
@@ -547,6 +557,8 @@ class PortfolioTrade(Base):
 
     __tablename__ = 'portfolio_trades'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     trade_uid = Column(String(128))
@@ -575,6 +587,8 @@ class PortfolioCashLedger(Base):
 
     __tablename__ = 'portfolio_cash_ledger'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     event_date = Column(Date, nullable=False, index=True)
@@ -594,6 +608,8 @@ class PortfolioCorporateAction(Base):
 
     __tablename__ = 'portfolio_corporate_actions'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     symbol = Column(String(16), nullable=False, index=True)
@@ -616,6 +632,8 @@ class PortfolioPosition(Base):
 
     __tablename__ = 'portfolio_positions'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     cost_method = Column(String(8), nullable=False, default='fifo')
@@ -648,6 +666,8 @@ class PortfolioPositionLot(Base):
 
     __tablename__ = 'portfolio_position_lots'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     cost_method = Column(String(8), nullable=False, default='fifo')
@@ -670,6 +690,8 @@ class PortfolioDailySnapshot(Base):
 
     __tablename__ = 'portfolio_daily_snapshots'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
     snapshot_date = Column(Date, nullable=False, index=True)
@@ -702,6 +724,8 @@ class PortfolioFxRate(Base):
 
     __tablename__ = 'portfolio_fx_rates'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     from_currency = Column(String(8), nullable=False, index=True)
     to_currency = Column(String(8), nullable=False, index=True)
@@ -727,6 +751,8 @@ class ConversationMessage(Base):
     """
     __tablename__ = 'conversation_messages'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(100), index=True, nullable=False)
     role = Column(String(20), nullable=False)  # user, assistant, system
@@ -739,6 +765,8 @@ class ConversationSessionState(Base):
 
     __tablename__ = 'conversation_session_states'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     session_id = Column(String(100), primary_key=True)
     selected_skill_ids_json = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
@@ -750,6 +778,8 @@ class ConversationSummary(Base):
 
     __tablename__ = 'conversation_summaries'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(100), nullable=False, unique=True, index=True)
     summary = Column(Text, nullable=False)
@@ -765,6 +795,8 @@ class AgentProviderTurn(Base):
 
     __tablename__ = 'agent_provider_turns'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(100), nullable=False, index=True)
     run_id = Column(String(64), nullable=False, index=True)
@@ -790,6 +822,8 @@ class LLMUsage(Base):
 
     __tablename__ = 'llm_usage'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 'analysis' | 'agent' | 'market_review'
     call_type = Column(String(32), nullable=False, index=True)
@@ -936,6 +970,8 @@ class AlertRuleRecord(Base):
 
     __tablename__ = 'alert_rules'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(64), nullable=False)
     target_scope = Column(String(32), nullable=False, default='single_symbol', index=True)
@@ -964,6 +1000,8 @@ class AlertTriggerRecord(Base):
 
     __tablename__ = 'alert_triggers'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     rule_id = Column(Integer, index=True)
     target = Column(String(64), nullable=False, index=True)
@@ -990,6 +1028,8 @@ class AlertNotificationRecord(Base):
 
     __tablename__ = 'alert_notifications'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     trigger_id = Column(Integer, index=True)
     channel = Column(String(32), nullable=False, index=True)
@@ -1011,6 +1051,8 @@ class AlertCooldownRecord(Base):
 
     __tablename__ = 'alert_cooldowns'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     rule_id = Column(Integer, index=True)
     # Reserved for future non-DB/expanded-scope rules; P4 queries by rule_id.
@@ -1033,6 +1075,8 @@ class DecisionSignalRecord(Base):
 
     __tablename__ = 'decision_signals'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     stock_code = Column(String(16), nullable=False, index=True)
     stock_name = Column(String(64))
@@ -1127,6 +1171,8 @@ class DecisionSignalOutcomeRecord(Base):
 
     __tablename__ = 'decision_signal_outcomes'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     signal_id = Column(Integer, nullable=False, index=True)
     horizon = Column(String(16), nullable=False, index=True)
@@ -1168,6 +1214,8 @@ class DecisionSignalFeedbackRecord(Base):
 
     __tablename__ = 'decision_signal_feedback'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     signal_id = Column(Integer, nullable=False, unique=True, index=True)
     feedback_value = Column(String(16), nullable=False, index=True)
@@ -1183,6 +1231,8 @@ class SkillOpinionSampleRecord(Base):
 
     __tablename__ = 'skill_opinion_samples'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     analysis_history_id = Column(
         Integer,
@@ -1227,6 +1277,8 @@ class SkillOpinionOutcomeRecord(Base):
 
     __tablename__ = 'skill_opinion_outcomes'
 
+    # 多租户：数据归属用户（tenant_id == dsa_users.id；NULL = 迁移前遗留，启动时回填）
+    tenant_id = Column(Integer, nullable=True, index=True)
     id = Column(Integer, primary_key=True, autoincrement=True)
     skill_opinion_sample_id = Column(
         Integer,
@@ -1385,6 +1437,13 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
             self._ensure_intelligence_items_unique_index()
+
+            # 多租户：补 tenant_id 列 / 建租户表 / 回填历史数据，
+            # 并在回填完成后启用租户守卫。必须在所有 _ensure_* 之后，
+            # 因为回填语句本身需要不受租户谓词限制。
+            from src.tenancy.install import bootstrap_tenancy
+
+            self._tenancy_report = bootstrap_tenancy(self._engine)
 
             self._initialized = True
             logger.info(f"数据库初始化完成: {db_url}")

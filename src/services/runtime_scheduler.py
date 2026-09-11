@@ -63,8 +63,16 @@ def _run_scheduled_analysis_process(
     result_queue: Any,
     stock_codes: Optional[List[str]],
     schedule_args_overrides: Dict[str, Any],
+    tenant_id: Optional[int] = None,
 ) -> None:
-    """Run one analysis in a spawn-safe child process."""
+    """Run one analysis in a spawn-safe child process.
+
+    多租户：``tenant_id`` 通过进程参数传入，并在子进程内用
+    :func:`src.tenancy.context.bind_user` 绑定。这是**必须**的——
+    ``spawn`` 子进程不继承父进程的 contextvars，不显式绑定的话
+    该用户的分析会退化为系统属主身份，读到错误的配置并把结果
+    写到错误的账户下。
+    """
     if os.name == "posix":
         try:
             os.setsid()
@@ -74,8 +82,19 @@ def _run_scheduled_analysis_process(
             # before analysis can create descendants.
             if os.getsid(0) != os.getpid():
                 raise
+
+    from src.tenancy.context import bind_user, multiuser_enabled
+
     service = RuntimeSchedulerService(schedule_args_overrides=schedule_args_overrides)
-    success = service._run_analysis_locked(stock_codes)
+
+    def _execute() -> bool:
+        return service._run_analysis_locked(stock_codes)
+
+    if multiuser_enabled() and tenant_id is not None:
+        with bind_user(int(tenant_id)):
+            success = _execute()
+    else:
+        success = _execute()
     result_queue.put({"success": success, "error": service._last_error})
 
 
@@ -344,6 +363,150 @@ class RuntimeSchedulerService:
             self._run_lock.release()
         return True
 
+    # ------------------------------------------------------------------
+    # 多租户：按用户调度
+    # ------------------------------------------------------------------
+
+    def _tenant_schedule_entries(self) -> List[Dict[str, Any]]:
+        """返回「需要独立调度」的用户清单。
+
+        多用户模式未启用时返回空列表，此时沿用上游的全局单任务调度。
+        只返回**显式配置了 SCHEDULE_TIMES 且开启 SCHEDULE_ENABLED** 的用户；
+        未配置个人时间表的用户由全局任务统一扇出执行。
+        """
+        try:
+            from src.tenancy.context import multiuser_enabled
+
+            if not multiuser_enabled():
+                return []
+            from src.tenancy.service import list_schedulable_users
+
+            entries = []
+            for entry in list_schedulable_users():
+                if not entry.get("schedule_enabled"):
+                    continue
+                times = entry.get("schedule_times") or []
+                if not times:
+                    # 没有个人时间表 → 跟随全局调度，避免重复执行
+                    continue
+                entries.append(entry)
+            return entries
+        except Exception as exc:  # noqa: BLE001 - 调度配置读取失败不应阻止启动
+            logger.warning("[tenancy] failed to load per-user schedules: %s", exc)
+            return []
+
+    def _tenant_fanout_targets(self) -> List[int]:
+        """返回「跟随全局调度时间」的用户 ID 列表。
+
+        这些用户在全局 ``SCHEDULE_TIMES`` 触发时，各自以独立身份执行一次
+        分析。显式关闭了 ``SCHEDULE_ENABLED`` 的用户被排除在外。
+        """
+        try:
+            from src.tenancy.context import multiuser_enabled
+
+            if not multiuser_enabled():
+                return []
+            from src.tenancy.service import list_schedulable_users
+
+            targets: List[int] = []
+            for entry in list_schedulable_users():
+                if entry.get("schedule_enabled") is False:
+                    continue
+                if entry.get("schedule_times"):
+                    # 有个人时间表 → 由独立任务负责
+                    continue
+                targets.append(int(entry["tenant_id"]))
+            return targets
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[tenancy] failed to load fan-out targets: %s", exc)
+            return []
+
+    @staticmethod
+    def _multiuser_active() -> bool:
+        try:
+            from src.tenancy.context import multiuser_enabled
+
+            return multiuser_enabled()
+        except Exception:  # noqa: BLE001 - 导入失败按单用户处理
+            return False
+
+    def _run_tenant_fanout(
+        self,
+        targets: List[int],
+        *,
+        generation: Optional[int] = None,
+    ) -> None:
+        """依次为每个用户执行一次分析。
+
+        刻意**串行**执行：全局分析锁 ``_RUNTIME_ANALYSIS_LOCK`` 会串行化
+        任何并发分析，若并行扇出只会让后到的用户被记为
+        ``analysis_already_running`` 而跳过。
+        """
+        total = len(targets)
+        succeeded = 0
+        for index, tenant_id in enumerate(targets, start=1):
+            with self._analysis_process_lock:
+                if generation is not None and generation != self._analysis_generation:
+                    logger.info("[tenancy] fan-out aborted at %d/%d (scheduler restarted)", index, total)
+                    return
+            logger.info("[tenancy] fan-out %d/%d: running analysis for user %s", index, total, tenant_id)
+            self._run_analysis_with_watchdog(generation=generation, tenant_id=tenant_id)
+            if self._last_error is None:
+                succeeded += 1
+        logger.info("[tenancy] fan-out finished: %d/%d users succeeded", succeeded, total)
+
+    def _start_tenant_fanout(self, *, generation: Optional[int] = None) -> bool:
+        """在后台线程中启动一次全用户扇出。"""
+        targets = self._tenant_fanout_targets()
+        if not targets:
+            logger.info("[tenancy] no tenants follow the global schedule; nothing to fan out")
+            return False
+        worker = threading.Thread(
+            target=self._run_tenant_fanout,
+            args=(targets,),
+            kwargs={"generation": generation},
+            daemon=True,
+            name="runtime-scheduler-fanout",
+        )
+        try:
+            worker.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[tenancy] failed to start fan-out thread: %s", exc)
+            return False
+        return True
+
+    def _run_analysis_for_tenant(self, tenant_id: int, generation: Optional[int] = None) -> None:
+        """以指定用户身份触发一次分析（在独立子进程中执行）。"""
+        self._start_analysis_watchdog(generation=generation, tenant_id=tenant_id)
+
+    def _register_tenant_schedules(self, scheduler, generation: Optional[int]) -> List[str]:
+        """为每个配置了个人时间表的用户注册独立的每日任务。"""
+        registered: List[str] = []
+        for entry in self._tenant_schedule_entries():
+            tenant_id = int(entry["tenant_id"])
+            times = entry.get("schedule_times") or []
+            label = f"tenant-{tenant_id}"
+            try:
+                scheduler.add_daily_task(
+                    partial(
+                        self._start_analysis_watchdog,
+                        tenant_id=tenant_id,
+                        generation=generation,
+                    ),
+                    times,
+                    name=label,
+                )
+                registered.append(label)
+            except Exception as exc:  # noqa: BLE001 - 单用户注册失败不阻断其它用户
+                logger.error(
+                    "[tenancy] failed to register schedule for user %s: %s", tenant_id, exc
+                )
+        if registered:
+            logger.info(
+                "[tenancy] registered per-user schedules: %s", ",".join(registered)
+            )
+        return registered
+
     def _analysis_timeout_seconds(self) -> int:
         try:
             value = os.getenv(
@@ -365,6 +528,7 @@ class RuntimeSchedulerService:
         *,
         lock_held: bool = False,
         generation: Optional[int] = None,
+        tenant_id: Optional[int] = None,
     ) -> None:
         if not lock_held and not self._run_lock.acquire(blocking=False):
             self._record_analysis_busy_skip()
@@ -377,10 +541,20 @@ class RuntimeSchedulerService:
         try:
             context = multiprocessing.get_context("spawn")
             result_queue = context.Queue()
+            # 多租户：只在确有必要时附加第 4 个位置参数。这样单用户模式下
+            # 进程参数元组与上游完全一致，任何替换了 ``_analysis_process_target``
+            # 的既有代码/测试都不会因为签名变化而破裂。
+            process_args = (result_queue, stock_codes, dict(self._schedule_args_overrides))
+            if tenant_id is not None:
+                process_args = process_args + (tenant_id,)
             process = context.Process(
                 target=self._analysis_process_target,
-                args=(result_queue, stock_codes, dict(self._schedule_args_overrides)),
-                name="runtime-scheduled-analysis",
+                args=process_args,
+                name=(
+                    "runtime-scheduled-analysis"
+                    if tenant_id is None
+                    else f"runtime-scheduled-analysis-tenant{tenant_id}"
+                ),
             )
             timeout = self._analysis_timeout_seconds()
             with self._analysis_process_lock:
@@ -463,6 +637,7 @@ class RuntimeSchedulerService:
         stock_codes: Optional[List[str]] = None,
         *,
         generation: Optional[int] = None,
+        tenant_id: Optional[int] = None,
     ) -> bool:
         with self._analysis_process_lock:
             current_generation = self._analysis_generation
@@ -477,9 +652,14 @@ class RuntimeSchedulerService:
                 stock_codes,
                 lock_held=True,
                 generation=generation,
+                tenant_id=tenant_id,
             ),
             daemon=True,
-            name="runtime-scheduler-watchdog",
+            name=(
+                "runtime-scheduler-watchdog"
+                if tenant_id is None
+                else f"runtime-scheduler-watchdog-tenant{tenant_id}"
+            ),
         )
         try:
             worker.start()
@@ -557,9 +737,17 @@ class RuntimeSchedulerService:
                 self.stop()
                 return
             config = self._config_provider()
-            if not self._is_schedule_enabled(config):
+            global_enabled = self._is_schedule_enabled(config)
+
+            # 多租户：用户可以在自己的设置里独立开启定时分析并指定时间，
+            # 因此「全局开关关闭」不再等同于「完全不调度」。
+            multiuser = self._multiuser_active()
+            tenant_entries = self._tenant_schedule_entries() if multiuser else []
+
+            if not global_enabled and not tenant_entries:
                 self.stop()
                 return
+
             background_tasks = self._current_background_tasks(config)
             self.stop()
             with self._analysis_process_lock:
@@ -578,13 +766,29 @@ class RuntimeSchedulerService:
                 schedule_times_provider=self._current_times,
                 register_signals=False,
             )
-            if run_immediately and self._run_immediately_in_background:
-                scheduler.set_daily_task(scheduled_analysis, run_immediately=False)
-            else:
-                scheduler.set_daily_task(
-                    scheduled_analysis,
-                    run_immediately=run_immediately,
-                )
+
+            # ---- 全局每日任务 ----
+            global_task: Optional[Callable] = None
+            if global_enabled:
+                if multiuser:
+                    # 多用户模式：全局任务不再是「以系统属主身份跑一次」，
+                    # 而是「为每个跟随全局时间的用户各跑一次」。
+                    # 否则所有非管理员用户的定时分析都会以系统属主身份执行，
+                    # 读到管理员的配置、把结果写进管理员的账户。
+                    global_task = partial(self._start_tenant_fanout, generation=generation)
+                else:
+                    global_task = scheduled_analysis
+
+            if global_task is not None:
+                if run_immediately and self._run_immediately_in_background:
+                    scheduler.set_daily_task(global_task, run_immediately=False)
+                else:
+                    scheduler.set_daily_task(global_task, run_immediately=run_immediately)
+
+            # ---- 按用户注册的个人时间表 ----
+            if multiuser:
+                self._register_tenant_schedules(scheduler, generation)
+
             for entry in background_tasks:
                 scheduler.add_background_task(
                     entry["task"],
@@ -592,8 +796,12 @@ class RuntimeSchedulerService:
                     run_immediately=entry.get("run_immediately", False),
                     name=entry.get("name"),
                 )
-            if run_immediately and self._run_immediately_in_background:
-                self._run_in_background_thread(scheduled_analysis)
+            if (
+                run_immediately
+                and self._run_immediately_in_background
+                and global_task is not None
+            ):
+                self._run_in_background_thread(global_task)
             thread = threading.Thread(
                 target=scheduler.run,
                 daemon=True,
@@ -675,6 +883,14 @@ class RuntimeSchedulerService:
             except Exception:  # pragma: no cover - defensive status fallback
                 schedule_times = []
         running = self._run_lock.locked()
+        tenant_tasks: List[str] = []
+        if scheduler is not None:
+            getter = getattr(scheduler, "named_daily_task_names", None)
+            if callable(getter):
+                try:
+                    tenant_tasks = list(getter())
+                except Exception:  # pragma: no cover - 诊断信息不应影响状态返回
+                    tenant_tasks = []
         return {
             "enabled": self._enabled,
             "running": running,
@@ -685,4 +901,6 @@ class RuntimeSchedulerService:
             "last_error": self._last_error,
             "last_skipped_at": self._last_skipped_at,
             "last_skip_reason": self._last_skip_reason,
+            "multiuser": self._multiuser_active(),
+            "tenant_schedules": tenant_tasks,
         }

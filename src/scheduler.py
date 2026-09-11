@@ -122,6 +122,9 @@ class Scheduler:
         self._task_callback: Optional[Callable] = None
         self._daily_job: Optional[Any] = None
         self._daily_jobs: List[Any] = []
+        # 多租户：按用户注册的额外每日任务。与 _daily_jobs 分开管理，
+        # 这样上游的 _refresh_daily_schedule_if_needed 不会误伤它们。
+        self._named_daily_jobs: Dict[str, List[Any]] = {}
         self._background_tasks: List[Dict[str, Any]] = []
         self._lifecycle_lock = threading.Lock()
         self._running = False
@@ -168,6 +171,92 @@ class Scheduler:
 
         self._daily_job = None
         self._daily_jobs = []
+
+    # ------------------------------------------------------------------
+    # 多租户：按用户注册的每日任务
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_task_for_logging(task: Callable, name: str) -> Callable:
+        """把任务包一层日志与异常捕获，避免单个用户的任务拖垮调度循环。"""
+
+        def _runner() -> None:
+            try:
+                logger.info("=" * 50)
+                logger.info(
+                    "定时任务开始执行 [%s] - %s",
+                    name,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                logger.info("=" * 50)
+                task()
+                logger.info(
+                    "定时任务执行完成 [%s] - %s",
+                    name,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            except Exception as exc:  # noqa: BLE001 - 单用户失败不影响其它用户
+                logger.exception("定时任务执行失败 [%s]: %s", name, exc)
+
+        return _runner
+
+    def add_daily_task(
+        self,
+        task: Callable,
+        schedule_times: Union[Sequence[str], str],
+        *,
+        name: Optional[str] = None,
+        run_immediately: bool = False,
+    ) -> List[Any]:
+        """注册一组具名每日任务（多租户按用户调度使用）。
+
+        与 :meth:`set_daily_task` 的区别：
+
+        - 可以有任意多组，互不覆盖；
+        - 不参与 ``_refresh_daily_schedule_if_needed`` 的重建流程；
+        - 每组独立捕获异常，单个用户失败不会影响其他用户。
+
+        Returns:
+            本次注册的 ``schedule`` job 列表。
+        """
+        label = name or getattr(task, "__name__", "daily_task")
+        candidates = normalize_schedule_times(schedule_times, fallback_time=self.schedule_time)
+        runner = self._wrap_task_for_logging(task, label)
+
+        self.cancel_named_daily_task(label)
+        jobs = [
+            self.schedule.every().day.at(candidate).do(runner)
+            for candidate in candidates
+        ]
+        self._named_daily_jobs[label] = jobs
+        logger.info("已注册每日任务 [%s]，执行时间: %s", label, ",".join(candidates))
+
+        if run_immediately:
+            runner()
+        return jobs
+
+    def cancel_named_daily_task(self, name: str) -> bool:
+        """取消一组具名每日任务。返回是否确实取消了内容。"""
+        jobs = self._named_daily_jobs.pop(name, None)
+        if not jobs:
+            return False
+        for job in jobs:
+            if hasattr(self.schedule, "cancel_job"):
+                self.schedule.cancel_job(job)
+            else:  # pragma: no cover - compatibility fallback
+                all_jobs = getattr(self.schedule, "jobs", None)
+                if isinstance(all_jobs, list) and job in all_jobs:
+                    all_jobs.remove(job)
+        logger.info("已取消每日任务 [%s]", name)
+        return True
+
+    def _cancel_all_named_daily_tasks(self) -> None:
+        for name in list(self._named_daily_jobs.keys()):
+            self.cancel_named_daily_task(name)
+
+    def named_daily_task_names(self) -> List[str]:
+        """返回当前已注册的具名每日任务名。"""
+        return sorted(self._named_daily_jobs.keys())
 
     def _configure_daily_task(self, schedule_time: str) -> bool:
         """(Re)register the daily job at the requested time."""
@@ -429,6 +518,7 @@ class Scheduler:
             self._stop_requested = True
             self._running = False
         self._cancel_daily_job()
+        self._cancel_all_named_daily_tasks()
 
 
 def run_with_schedule(

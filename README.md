@@ -22,6 +22,31 @@
 
 </div>
 
+## 🔀 关于本仓库（fork 说明）
+
+本仓库是 [`ZhuLinsen/daily_stock_analysis`](https://github.com/ZhuLinsen/daily_stock_analysis) 的 fork，
+在上游「单管理员」模型之上**新增了多用户（多租户）能力**：
+
+- 每个用户拥有独立的自选股、通知渠道、定时分析时间表与 LLM 用量归属；
+- 26 张业务表按 `tenant_id` 自动隔离，查询/写入无需业务代码显式加条件；
+- 新增 Bearer Token 认证，供 CowAgent 等自动化系统以「某个具体用户」的身份调用 API；
+- **默认关闭**：`DSA_MULTIUSER_ENABLED=false` 时行为与上游完全一致。
+
+📖 完整设计、API 一览、安全说明与上游同步流程见 **[docs/multi-tenancy.md](docs/multi-tenancy.md)**。
+
+```bash
+# 启用多用户模式
+echo "DSA_MULTIUSER_ENABLED=true" >> .env
+
+# 给自动化客户端签发 Token
+curl -X POST http://localhost:8000/api/v1/tenancy/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","password":"<密码>"}'
+```
+
+> ⚠️ 合并上游更新后请重跑 `pytest tests/test_tenancy.py`。上游新增业务表时，
+> 需要手动把表名加入 `src/tenancy/schema.py` 的 `SCOPED_TABLES`，否则新表不受租户隔离。
+
 ## 💖 赞助商 (Sponsors)
 <div align="center">
   <p align="center">
