@@ -47,6 +47,43 @@ curl -X POST http://localhost:8000/api/v1/tenancy/auth/token \
 > ⚠️ 合并上游更新后请重跑 `pytest tests/test_tenancy.py`。上游新增业务表时，
 > 需要手动把表名加入 `src/tenancy/schema.py` 的 `SCOPED_TABLES`，否则新表不受租户隔离。
 
+### 🔌 MCP 服务器（接 CowAgent）
+
+`mcp_server/` 把本项目的 REST API 包装成 **26 个 MCP 工具**，覆盖分析、自选股、
+选股、问股、AI 建议、用量监控，供 [CowAgent](https://github.com/zhayujie/CowAgent)
+等 Agent 框架通过 stdio 调用 —— 用微信做入口和出口。
+
+```bash
+pip install -r mcp_server/requirements.txt
+
+# 自检：连通性 + 鉴权 + 身份
+DSA_BASE_URL=http://127.0.0.1:8000 DSA_API_TOKEN=<token> python -m mcp_server --check
+```
+
+CowAgent 侧配置（`~/cow/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "dsa": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "DSA_BASE_URL": "http://127.0.0.1:8000",
+        "DSA_API_TOKEN": "<该用户的 token>"
+      },
+      "tool_name_prefix": "dsa_"
+    }
+  }
+}
+```
+
+> ⚠️ `env` 必须显式写：MCP 子进程**不继承**父进程的环境变量（已实测）。
+> 加 `tool_name_prefix` 是为了避开 `get_watchlist` 这类通用名与内置工具撞名。
+
+📖 完整接入步骤（含微信通道、隔离模型、故障排查）见
+**[docs/cowagent-integration.md](docs/cowagent-integration.md)**。
+
 ## 💖 赞助商 (Sponsors)
 <div align="center">
   <p align="center">

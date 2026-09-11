@@ -30,9 +30,15 @@ from src.tenancy.context import (
 from src.tenancy.middleware import USER_COOKIE_NAME
 from src.tenancy.scope import scope_status
 from src.tenancy.settings import (
-    public_settings_view,
-    save_user_settings,
+    WatchlistError,
+    add_user_stock,
     delete_user_settings,
+    public_settings_view,
+    remove_user_stock,
+    replace_user_stock_list,
+    reset_user_stock_list,
+    resolve_stock_list,
+    save_user_settings,
     supported_keys,
 )
 
@@ -80,6 +86,13 @@ def _error_response(exc: service.TenancyError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.code, "message": exc.message},
+    )
+
+
+def _watchlist_error(exc: WatchlistError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={"error": "invalid_stock_code", "message": str(exc)},
     )
 
 
@@ -152,6 +165,20 @@ class SettingsRequest(BaseModel):
 
 class ResetSettingsRequest(BaseModel):
     keys: List[str] = Field(default_factory=list)
+
+
+class WatchlistItemRequest(BaseModel):
+    stock_code: str = Field(..., alias="stockCode", description="股票代码，如 600519")
+
+    model_config = {"populate_by_name": True}
+
+
+class WatchlistReplaceRequest(BaseModel):
+    stock_codes: List[str] = Field(
+        default_factory=list, alias="stockCodes", description="完整替换为这些代码"
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +486,65 @@ async def reset_settings(
         "deleted": deleted,
         "settings": public_settings_view(principal.user_id),
     }
+
+
+# ---------------------------------------------------------------------------
+# 自选股（按用户）
+#
+# 外部系统（MCP / CowAgent）请走这组接口，**不要**用上游的
+# ``/api/v1/stocks/watchlist/*`` —— 那条路径写的是全局 STOCK_LIST，会串号。
+# ---------------------------------------------------------------------------
+
+@router.get("/watchlist", summary="读取自己的自选股")
+async def get_watchlist(principal: Principal = Depends(require_principal)) -> Dict[str, Any]:
+    return {"user_id": principal.user_id, **resolve_stock_list(principal.user_id)}
+
+
+@router.post("/watchlist", summary="加入自选")
+async def add_watchlist_item(
+    payload: WatchlistItemRequest,
+    principal: Principal = Depends(require_principal),
+):
+    try:
+        result = add_user_stock(principal.user_id, payload.stock_code)
+    except WatchlistError as exc:
+        return _watchlist_error(exc)
+    logger.info("[tenancy] user %s 加入自选 %s", principal.username, result["added"])
+    return {"ok": True, "user_id": principal.user_id, **result}
+
+
+@router.put("/watchlist", summary="整体替换自选")
+async def replace_watchlist(
+    payload: WatchlistReplaceRequest,
+    principal: Principal = Depends(require_principal),
+):
+    try:
+        result = replace_user_stock_list(principal.user_id, payload.stock_codes)
+    except WatchlistError as exc:
+        return _watchlist_error(exc)
+    return {"ok": True, "user_id": principal.user_id, **result}
+
+
+@router.delete("/watchlist", summary="清空个人自选（回落到全局）")
+async def reset_watchlist(principal: Principal = Depends(require_principal)) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "user_id": principal.user_id,
+        **reset_user_stock_list(principal.user_id),
+    }
+
+
+@router.delete("/watchlist/{stock_code}", summary="从自选移除")
+async def delete_watchlist_item(
+    stock_code: str,
+    principal: Principal = Depends(require_principal),
+):
+    try:
+        result = remove_user_stock(principal.user_id, stock_code)
+    except WatchlistError as exc:
+        return _watchlist_error(exc)
+    logger.info("[tenancy] user %s 移除自选 %s", principal.username, result["removed"])
+    return {"ok": True, "user_id": principal.user_id, **result}
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -394,3 +395,133 @@ def public_settings_view(tenant_id: int) -> Dict[str, Any]:
             "value": mask_value(spec, value),
         }
     return view
+
+
+# ---------------------------------------------------------------------------
+# 自选股（按用户）
+#
+# ⚠️ 为什么不复用上游的 ``POST /api/v1/stocks/watchlist/add``：
+# 那条路径写的是**进程级全局** ``STOCK_LIST``（经 SystemConfigService 落到
+# 系统配置），在多租户下会造成「A 加自选，B 也跟着变」的串号。外部系统
+# （MCP / CowAgent）必须走下面这组按用户读写的接口。
+# ---------------------------------------------------------------------------
+
+#: 股票代码的宽松白名单：字母数字开头，允许 . - _ ，总长 ≤16。
+#: 刻意不在这里校验市场归属 —— 那属于数据源层的职责，这里只挡住明显的垃圾输入。
+_STOCK_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$")
+
+
+class WatchlistError(ValueError):
+    """自选股操作失败（代码为空 / 格式不合法）。"""
+
+
+def normalize_stock_code(code: Any) -> str:
+    """规范化股票代码：去空白、转大写、校验格式。"""
+    text = str(code or "").strip().upper()
+    if not text:
+        raise WatchlistError("股票代码不能为空")
+    if not _STOCK_CODE_RE.match(text):
+        raise WatchlistError(f"股票代码格式不合法: {code!r}")
+    return text
+
+
+def global_stock_list() -> List[str]:
+    """全局自选（``.env`` 里的 ``STOCK_LIST``）。读不到时返回空列表。"""
+    try:
+        from src.config import get_config
+
+        raw = getattr(get_config(), "stock_list", None) or []
+    except Exception as exc:  # noqa: BLE001 —— 配置读取失败不应让自选接口整体 500
+        logger.warning("[tenancy] 读取全局 STOCK_LIST 失败: %s", exc)
+        return []
+    if isinstance(raw, str):
+        raw = _split_csv(raw)
+    return [str(item).strip().upper() for item in raw if str(item).strip()]
+
+
+def _write_user_stock_list(tenant_id: int, codes: List[str]) -> List[str]:
+    """写回用户个人自选（大写 + 去重 + 保序）。"""
+    seen: set = set()
+    normalized: List[str] = []
+    for code in codes:
+        text = str(code).strip().upper()
+        if text and text not in seen:
+            seen.add(text)
+            normalized.append(text)
+    save_user_settings(tenant_id, {"STOCK_LIST": normalized})
+    return normalized
+
+
+def user_stock_list(tenant_id: int) -> Optional[List[str]]:
+    """用户自己的自选；未配置返回 ``None``（表示「沿用全局」）。"""
+    return effective_stock_list(tenant_id)
+
+
+def resolve_stock_list(tenant_id: int) -> Dict[str, Any]:
+    """自选视图：区分「个人已配置」与「沿用全局」。"""
+    own = user_stock_list(tenant_id)
+    if own is not None:
+        return {"stock_codes": own, "source": "user", "inherited_from_global": False}
+    return {"stock_codes": global_stock_list(), "source": "global", "inherited_from_global": True}
+
+
+def _base_list_for_mutation(tenant_id: int):
+    """取「改动的起点」：优先个人列表，未配置则继承全局。
+
+    返回 ``(base, inherited)``。
+    """
+    own = user_stock_list(tenant_id)
+    if own is None:
+        return global_stock_list(), True
+    return list(own), False
+
+
+def add_user_stock(tenant_id: int, stock_code: Any) -> Dict[str, Any]:
+    """加入自选。
+
+    ⚠️ 用户尚未配置个人列表时**先继承全局列表再追加**。否则「加一只」会把
+    继承来的整份自选替换成这一只 —— 这是很容易踩的坑。
+    """
+    code = normalize_stock_code(stock_code)
+    base, inherited = _base_list_for_mutation(tenant_id)
+    already_present = code in base
+    if not already_present:
+        base = base + [code]
+    codes = _write_user_stock_list(tenant_id, base)
+    return {
+        "stock_codes": codes,
+        "source": "user",
+        "inherited_from_global": inherited,
+        "added": code,
+        "already_present": already_present,
+    }
+
+
+def remove_user_stock(tenant_id: int, stock_code: Any) -> Dict[str, Any]:
+    """从自选移除（同样先继承全局，避免误删继承来的其他股票）。"""
+    code = normalize_stock_code(stock_code)
+    base, inherited = _base_list_for_mutation(tenant_id)
+    was_present = code in base
+    if was_present:
+        base = [item for item in base if item != code]
+    codes = _write_user_stock_list(tenant_id, base)
+    return {
+        "stock_codes": codes,
+        "source": "user",
+        "inherited_from_global": inherited,
+        "removed": code,
+        "was_present": was_present,
+    }
+
+
+def replace_user_stock_list(tenant_id: int, codes: Sequence[Any]) -> Dict[str, Any]:
+    """整体替换个人自选。"""
+    normalized = [normalize_stock_code(code) for code in (codes or [])]
+    result = _write_user_stock_list(tenant_id, normalized)
+    return {"stock_codes": result, "source": "user", "inherited_from_global": False}
+
+
+def reset_user_stock_list(tenant_id: int) -> Dict[str, Any]:
+    """清空个人自选，回落到全局配置。"""
+    delete_user_settings(tenant_id, ["STOCK_LIST"])
+    return resolve_stock_list(tenant_id)
