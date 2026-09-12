@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -181,6 +181,13 @@ class WatchlistReplaceRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class WeChatBindRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=32, description="Web 端注册用户名")
+    password: str = Field(..., min_length=1, max_length=128, description="Web 端注册密码")
+    wechat_id: str = Field(..., min_length=1, max_length=64, description="微信唯一标识 wxid")
+    wechat_nickname: Optional[str] = Field(None, max_length=64, description="微信昵称")
+
+
 # ---------------------------------------------------------------------------
 # 能力探测
 # ---------------------------------------------------------------------------
@@ -315,6 +322,93 @@ async def change_password(
     )
     response.delete_cookie(key=USER_COOKIE_NAME, path="/")
     return response
+
+
+# ---------------------------------------------------------------------------
+# 微信绑定与实时二维码（门禁协同）
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/wechat-bind", summary="微信门禁绑定账号")
+async def wechat_bind(payload: WeChatBindRequest, request: Request):
+    """微信机器人门禁验证：输入账号密码，将微信 wechat_id 绑定到该用户并签发 Token。"""
+    try:
+        user = service.bind_wechat(
+            username=payload.username,
+            password=payload.password,
+            wechat_id=payload.wechat_id,
+            wechat_nickname=payload.wechat_nickname,
+            client_ip=_client_ip(request),
+        )
+        token = service.issue_api_token(
+            user.id, ttl_seconds=365 * 86400, client_ip=_client_ip(request)
+        )
+        return {
+            "ok": True,
+            "message": "绑定成功",
+            "user": user.to_public_dict(),
+            "token": token,
+            "token_type": "Bearer",
+        }
+    except service.TenancyError as exc:
+        return _error_response(exc)
+
+
+@router.get("/auth/wechat-status", summary="查询微信绑定状态")
+async def wechat_status(wechat_id: str = Query(..., min_length=1)):
+    """查询某个 wechat_id 是否已绑定有效账号。"""
+    user = service.get_user_by_wechat_id(wechat_id)
+    if user is None:
+        return {"bound": False, "user": None}
+    return {
+        "bound": True,
+        "user": user.to_public_dict(),
+    }
+
+
+@router.post("/auth/wechat-unbind", summary="解绑微信")
+async def wechat_unbind(request: Request, principal: Principal = Depends(require_principal)):
+    """当前登录用户解绑自己的微信。"""
+    try:
+        user = service.unbind_wechat(principal.user_id, client_ip=_client_ip(request))
+        return {"ok": True, "message": "解绑成功", "user": user.to_public_dict()}
+    except service.TenancyError as exc:
+        return _error_response(exc)
+
+
+@router.get("/wechat/qrlogin", summary="获取微信二维码（代理 CowAgent）")
+async def get_wechat_qr():
+    """获取当前 CowAgent 的实时微信二维码。"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("http://cowagent:9899/api/weixin/qrlogin")
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as exc:
+        logger.error("[tenancy] failed to proxy qrlogin from cowagent: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": f"无法连接到微信机器人通道: {exc}"},
+        )
+
+
+@router.post("/wechat/qrlogin", summary="轮询微信二维码状态（代理 CowAgent）")
+async def poll_wechat_qr(request: Request):
+    """轮询微信二维码的扫描与确认状态。"""
+    import httpx
+    try:
+        body = await request.json()
+    except Exception:
+        body = {"action": "poll"}
+    try:
+        async with httpx.AsyncClient(timeout=40.0) as client:
+            resp = await client.post("http://cowagent:9899/api/weixin/qrlogin", json=body)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as exc:
+        logger.error("[tenancy] failed to proxy qr poll from cowagent: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"status": "error", "message": f"轮询微信通道异常: {exc}"},
+        )
 
 
 # ---------------------------------------------------------------------------

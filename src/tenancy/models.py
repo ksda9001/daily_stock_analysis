@@ -66,6 +66,11 @@ class TenantUser(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     last_login_at = Column(DateTime, nullable=True)
 
+    #: 绑定的微信 ID 与微信昵称
+    wechat_id = Column(String(64), nullable=True, unique=True, index=True)
+    wechat_nickname = Column(String(64), nullable=True)
+    wechat_bound_at = Column(DateTime, nullable=True)
+
     __table_args__ = (
         Index("ix_dsa_users_status_role", "status", "role"),
     )
@@ -87,6 +92,10 @@ class TenantUser(Base):
             "role": self.role,
             "status": self.status,
             "is_system": bool(self.is_system),
+            "wechat_id": self.wechat_id,
+            "wechat_nickname": self.wechat_nickname,
+            "wechat_bound": bool(self.wechat_id),
+            "wechat_bound_at": self.wechat_bound_at.isoformat() if self.wechat_bound_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,

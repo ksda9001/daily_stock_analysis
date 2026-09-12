@@ -23,6 +23,8 @@ import {
   SettingsLoading,
   SettingsPanelErrorBoundary,
   SettingsSectionCard,
+  WechatBindingCard,
+  UserManagementCard,
 } from '../components/settings';
 import { WEB_BUILD_INFO } from '../utils/constants';
 import { parseStockListValue } from '../utils/stockList';
@@ -1341,6 +1343,8 @@ const SettingsPage: React.FC = () => {
               </SettingsSectionCard>
             ) : null}
             {activeCategory === 'system' ? <AuthSettingsCard /> : null}
+            {activeCategory === 'system' ? <WechatBindingCard /> : null}
+            {activeCategory === 'system' ? <UserManagementCard /> : null}
             {activeCategory === 'system' ? (
               <SchedulerSettingsCard
                 items={rawActiveItems}

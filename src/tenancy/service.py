@@ -63,6 +63,9 @@ class UserRecord:
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
+    wechat_id: Optional[str] = None
+    wechat_nickname: Optional[str] = None
+    wechat_bound_at: Optional[datetime] = None
 
     @property
     def is_active(self) -> bool:
@@ -81,6 +84,10 @@ class UserRecord:
             "role": self.role,
             "status": self.status,
             "is_system": self.is_system,
+            "wechat_id": self.wechat_id,
+            "wechat_nickname": self.wechat_nickname,
+            "wechat_bound": bool(self.wechat_id),
+            "wechat_bound_at": self.wechat_bound_at.isoformat() if self.wechat_bound_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
@@ -101,6 +108,9 @@ def _snapshot(user: TenantUser) -> UserRecord:
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login_at=user.last_login_at,
+        wechat_id=getattr(user, "wechat_id", None),
+        wechat_nickname=getattr(user, "wechat_nickname", None),
+        wechat_bound_at=getattr(user, "wechat_bound_at", None),
     )
 
 
@@ -137,6 +147,19 @@ def get_user_by_username(username: str) -> Optional[UserRecord]:
         user = (
             session.query(TenantUser)
             .filter(TenantUser.username == value)
+            .one_or_none()
+        )
+        return _snapshot(user) if user is not None else None
+
+
+def get_user_by_wechat_id(wechat_id: str) -> Optional[UserRecord]:
+    value = (wechat_id or "").strip()
+    if not value:
+        return None
+    with _session_scope() as session:
+        user = (
+            session.query(TenantUser)
+            .filter(TenantUser.wechat_id == value)
             .one_or_none()
         )
         return _snapshot(user) if user is not None else None
@@ -323,6 +346,79 @@ def mark_login(user_id: int) -> None:
         user = session.get(TenantUser, int(user_id))
         if user is not None:
             user.last_login_at = datetime.now()
+
+
+def bind_wechat(
+    username: str,
+    password: str,
+    wechat_id: str,
+    wechat_nickname: Optional[str] = None,
+    client_ip: Optional[str] = None,
+) -> UserRecord:
+    wx_id = (wechat_id or "").strip()
+    if not wx_id:
+        raise TenancyError("微信唯一标识不能为空", status_code=400, code="invalid_wechat_id")
+    user = authenticate(username, password)
+    if user is None:
+        raise TenancyError("账号或密码错误", status_code=401, code="invalid_credentials")
+    if not user.is_active:
+        raise TenancyError("账号已被禁用，无法绑定", status_code=403, code="user_disabled")
+
+    with _session_scope() as session:
+        conflicts = session.query(TenantUser).filter(
+            TenantUser.wechat_id == wx_id,
+            TenantUser.id != user.id,
+        ).all()
+        for conflict in conflicts:
+            conflict.wechat_id = None
+            conflict.wechat_nickname = None
+            conflict.wechat_bound_at = None
+            conflict.updated_at = datetime.now()
+
+        db_user = session.get(TenantUser, int(user.id))
+        if db_user is None:
+            raise TenancyError("用户不存在", status_code=404, code="user_not_found")
+
+        db_user.wechat_id = wx_id
+        db_user.wechat_nickname = (wechat_nickname or "").strip() or db_user.display_name or db_user.username
+        db_user.wechat_bound_at = datetime.now()
+        db_user.updated_at = datetime.now()
+
+        record_audit(
+            session,
+            action="user.wechat_bind",
+            tenant_id=int(user.id),
+            actor_id=int(user.id),
+            actor_username=user.username,
+            detail=f"wechat_id={wx_id}, nickname={db_user.wechat_nickname}",
+            client_ip=client_ip,
+        )
+        logger.info("[tenancy] user %s bound wechat_id %s", user.username, wx_id)
+        return _snapshot(db_user)
+
+
+def unbind_wechat(user_id: int, client_ip: Optional[str] = None) -> UserRecord:
+    with _session_scope() as session:
+        db_user = session.get(TenantUser, int(user_id))
+        if db_user is None:
+            raise TenancyError("用户不存在", status_code=404, code="user_not_found")
+        old_wx = db_user.wechat_id
+        db_user.wechat_id = None
+        db_user.wechat_nickname = None
+        db_user.wechat_bound_at = None
+        db_user.updated_at = datetime.now()
+
+        record_audit(
+            session,
+            action="user.wechat_unbind",
+            tenant_id=int(user_id),
+            actor_id=int(user_id),
+            actor_username=db_user.username,
+            detail=f"old_wechat_id={old_wx}",
+            client_ip=client_ip,
+        )
+        logger.info("[tenancy] user %s unbound wechat", db_user.username)
+        return _snapshot(db_user)
 
 
 def change_password(

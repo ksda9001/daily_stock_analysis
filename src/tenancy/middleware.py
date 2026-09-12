@@ -55,6 +55,8 @@ EXEMPT_PATHS = frozenset({
     "/api/v1/tenancy/capabilities",
     "/api/v1/tenancy/auth/login",
     "/api/v1/tenancy/auth/token",
+    "/api/v1/tenancy/auth/wechat-bind",
+    "/api/v1/tenancy/auth/wechat-status",
     # 上游管理员登录流程必须可达，否则管理员无法进入系统属主身份
     "/api/v1/auth/login",
     "/api/v1/auth/status",
