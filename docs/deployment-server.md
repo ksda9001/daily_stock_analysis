@@ -410,6 +410,27 @@ fi 的证书 lineage → `nginx -t` → `systemctl reload nginx`。
 > 再从公网 `http://<域名>/.well-known/acme-challenge/<file>` 取回来，
 > 取到了才继续。两种代理模式都能正确判断。
 
+**⚠️ 走 Cloudflare 代理时，「证书不匹配」不是你要担心的问题**
+
+这是个很容易搞反的点。开了橙色云之后，TLS 有两段，**浏览器只看第一段**：
+
+```
+浏览器 ──TLS(1)──▶ Cloudflare ──TLS(2)──▶ 源站 172.245.211.211
+         ↑ 浏览器看到的是这张          ↑ 这张只在 CF 的 SSL 模式为
+                                            Full (strict) 时才被校验
+```
+
+- **TLS(1)**：Cloudflare 用**自己的**通配符证书应答（实测 `CN=myfi.cc.cd`，
+  SAN `myfi.cc.cd, *.myfi.cc.cd`，签发者 Google Trust Services）。
+  **`*.myfi.cc.cd` 已经覆盖了 `cow.myfi.cc.cd`**，所以浏览器看到的证书**本来就是有效的**，
+  和源站那张证书有没有 cow 无关。
+- **TLS(2)**：只有 SSL 模式选 **Full (strict)** 时，Cloudflare 才会校验源站证书。
+  这才是「源站证书必须覆盖该域名」的原因。
+
+所以：
+- 浏览器报**证书错误** → 查 Cloudflare 的 SSL/TLS 模式，以及证书是否覆盖该域名；
+- 浏览器**不报证书错误但打不开** → 大概率**不是证书问题**，往下面查。
+
 **排查：nginx 配置写了但访问不了**
 
 按这个顺序查，能一步定位：
@@ -471,3 +492,98 @@ QR_MAX_REFRESHES   = 10      # 最多刷新 10 次
 - `china-routes.service` 显示 `inactive (dead)` 但路由已装载且 `enabled` 开机自启；
   `RemainAfterExit=yes` 下出现该状态略反常，因机制工作正常故未改动。
 - 旧的 overlay 沙箱容器 `dsa-sandbox` 已停止并置 `--restart=no`，未删除。
+
+---
+
+## 10. ⚠️ 前端注入层（`static/dsa-wechat.js`）的坑
+
+多用户登录 UI / 用户管理 / 微信绑定这些界面，**不在 React 源码里**，而是
+`static/dsa-wechat.js`（约 1300 行 IIFE）在运行时注入 DOM 与 CSS 实现的。
+React 侧只贡献了 9 项基础导航。
+
+**为什么这很重要**：改布局时你会先去翻 `Shell.tsx` / `SidebarNav.tsx`，
+但那些文件根本没动过。**症状与代码位置对不上，就是先怀疑注入层。**
+
+### 10.1 症状 → 根因对照（都实测过）
+
+注入层用 `!important` 写 CSS，而 **Tailwind 的 `.hidden{display:none}` 不带 `!important`**，
+于是 `display: flex !important` 会**永久压过**它。一次改动引出三个缺陷：
+
+| 症状 | 根因 |
+|---|---|
+| 窗口缩到 `lg`(1024px) 以下，桌面侧边栏**不再隐藏** | `aside { display: flex !important }` 压过 `hidden lg:flex` |
+| 左边缘露出一角**被压扁的圆角按钮** | 同一缺陷下，移动端 ☰ 按钮（`Shell.tsx` 里 `fixed z-40` 的容器）被后出现的 `aside`（**同为 `z-40`，DOM 顺序在后**）盖住，只在侧边栏圆角处露出 |
+| 主题/语言下拉**右侧被切、勾选图标消失且不可点** | `aside > div` 与 `aside nav` 的 `overflow: hidden` 裁掉了 `nav` 内**绝对定位**的下拉（实测裁掉 30px） |
+
+### 10.2 正确改法
+
+```css
+/* ✅ 只补 flex-direction。元素 display:none 时该属性无副作用 */
+aside { flex-direction: column !important; }
+
+/* ✅ 菜单展开时才放开裁剪，不永久破坏滚动容器 */
+aside:has([role="menu"]) > div,
+aside:has([role="menu"]) nav { overflow: visible !important; }
+```
+
+**⚠️ 这段 CSS 位于 JS 模板字面量内（`style.textContent = \`...\``）：注释里禁止出现反引号**，
+否则会提前终止模板字符串，**整个注入脚本语法报错、全部注入 UI 消失**。
+本次就踩到了 —— 改完务必跑一次语法检查：
+
+```bash
+node --check /root/dsa-fork/repo/static/dsa-wechat.js   # 宿主机无 node 时，先拉到本地跑
+```
+
+改完还要 **bump `static/index.html` 里注入脚本的 `?v=`**，否则浏览器读缓存。
+
+> 另一个已修的坑：**入口 `<script type="module" src="/assets/index-*.js">` 上不要加 `?v=`**。
+> 加了会让 ESM 模块 URL 与分块内硬编码的相对导入不匹配 → 入口被实例化两次 →
+> `AuthContext` 分裂 → `useAuth must be used within AuthProvider` → 登录页闪
+> `RouteErrorBoundary`「页面加载失败」。**破缓存只对非 module 的注入脚本做。**
+
+### 10.3 改完怎么验（headless Chromium + CDP）
+
+服务器已有 `/usr/bin/chromium`。宿主机 python 没有 `websocket-client`，
+可从容器里借（纯 Python 包，跨版本可用）：
+
+```bash
+docker cp dsa-server:/usr/local/lib/python3.11/site-packages/websocket /tmp/pylibs/websocket
+```
+
+**管理员会话**：不需要知道 admin 密码，直接用应用自己的签发函数铸一个短时效 token
+（**只做签名、不改任何数据**）：
+
+```bash
+docker exec dsa-server python -c "
+import sys; sys.path.insert(0,'/app')
+from src.tenancy.tokens import issue_token
+open('/tmp/token','w').write(issue_token(1, 2, ttl_seconds=3600))"   # user_id=1 是 admin
+```
+
+**必须做前后对比**：只看「改完正常」证明不了这个测试能抓到 bug。
+回退到预补丁版本再测一遍，确认缺陷**真的复现**。本次实测：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 900px 下 `aside` 的 `display` | `flex`（应为 `none`） | `none` ✅ |
+| 主题下拉被裁像素 | 右 30px | 0 ✅ |
+| 下拉右缘 hit-test | 命中页面 `div`（不可点） | 命中 `menu` ✅ |
+| ☰ 按钮中心 hit-test（≤1023px） | 命中侧边栏 `div`（被盖住） | 命中 `button` ✅ |
+
+> 判定「有没有被裁」，别只看 `getBoundingClientRect()` —— 祖先的 `overflow`
+> **不会**改变 rect。要逐级求**与各裁剪祖先 rect 的交集**，或直接 `elementFromPoint` 试右缘。
+
+### 10.4 ⚠️ 前端产物必须进镜像，否则重建即回退
+
+`Dockerfile.patch` 原先只 `COPY` Python 源码，注释还写着「fork 未改动 static/」——
+**这句话后来不成立了**：官方镜像里的前端是**未修补**版本
+（`index.html` md5 `04bc3e30…`、`assets/index-Dhkgyx-b.js` md5 `67280df9…`），
+线上跑的是 `docker cp` 塞进去的修补版。**重建镜像会静默回退到未修补 bundle，
+登录页 `RouteErrorBoundary` 复现。**
+
+已加入 `COPY repo/static/ /app/static/`。`repo/static` 是镜像 `/app/static` 的**子集**，
+`COPY` 是**合并**语义，不会删掉镜像自带的 `stocks.index.json` / `vite.svg` /
+`build-info.json` 及其余 assets chunk。
+
+> 教训：**用 `docker cp` 打的热补丁不算部署完成。** 每次 `docker cp` 之后都要问一句
+> 「这个文件重建后会回来吗？」，不会就补进 `Dockerfile.patch`。
