@@ -245,9 +245,113 @@
   // 1. Multi-User Login Enhancement on /login
   // =========================================================================
   function enhanceLoginPage() {
-    // Native React bundle (LoginPage-_15D7jin.js & index-Dhkgyx-b.js) now natively handles
-    // the username field and multi-user login state, avoiding DOM desync with React.
-    return;
+    if (!window.location.pathname.startsWith('/login')) return;
+
+    // 1. Check if native React already rendered the username input
+    const existingUserField = document.getElementById('username');
+    if (existingUserField) {
+      return;
+    }
+
+    // 2. Failsafe: If React rendered without #username (e.g. old browser cached bundle)
+    const pwdInput = document.getElementById('password');
+    if (!pwdInput) return;
+
+    const form = pwdInput.closest('form');
+    if (!form || form.dataset.dsaEnhanced) return;
+    form.dataset.dsaEnhanced = 'true';
+
+    // Update Card Headers if needed
+    const cardEl = form.parentElement;
+    if (cardEl) {
+      const titleEl = cardEl.querySelector('h1 span') || cardEl.querySelector('h1');
+      if (titleEl && !titleEl.textContent.includes('用户登录')) {
+        titleEl.textContent = '用户登录';
+      }
+      const descEl = cardEl.querySelector('p');
+      if (descEl && !descEl.textContent.includes('系统账号')) {
+        descEl.textContent = '请输入您的系统账号与密码以进入量化决策工作台。';
+      }
+    }
+
+    // Inject Username field right above password
+    const pwdContainer = pwdInput.closest('.flex.flex-col') || pwdInput.parentElement;
+    const userWrapper = document.createElement('div');
+    userWrapper.id = 'dsa-injected-username-container';
+    userWrapper.className = 'flex flex-col';
+    userWrapper.style.marginBottom = '1rem';
+    userWrapper.innerHTML = `
+      <label for="username" class="mb-2 text-sm font-medium" style="color: var(--login-label-text, #e5e7eb);">
+        用户名 / 账号
+      </label>
+      <div class="relative flex items-center">
+        <div class="absolute left-3.5 z-10 pointer-events-none" style="color: #9ca3af;">
+          <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7 0 3.75 0 017 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+          </svg>
+        </div>
+        <input
+          id="username"
+          name="username"
+          type="text"
+          placeholder="管理员请输入 admin，成员请输入账号"
+          autocomplete="username"
+          class="input-surface input-focus-glow h-11 w-full rounded-xl border bg-transparent pl-10 pr-4 text-sm transition-all focus:outline-none input-appearance-login"
+          style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.18); color: #fff; padding-left: 38px; height: 44px; border-radius: 12px;"
+        />
+      </div>
+    `;
+
+    if (pwdContainer && pwdContainer.parentElement) {
+      pwdContainer.parentElement.insertBefore(userWrapper, pwdContainer);
+    }
+
+    const userInput = document.getElementById('username');
+    if (userInput) userInput.focus();
+
+    // Intercept submit event to ensure username is sent
+    form.addEventListener('submit', async function(e) {
+      const u = userInput ? userInput.value.trim() : '';
+      const p = pwdInput ? pwdInput.value : '';
+
+      if (!u && !p) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const originalText = submitBtn ? submitBtn.textContent : '';
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '正在登录...';
+      }
+
+      try {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: u || 'admin', password: p })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          const params = new URLSearchParams(window.location.search);
+          const redirect = params.get('redirect') || '/';
+          window.location.assign(redirect);
+        } else {
+          alert('登录失败: ' + (data.message || data.error || '账号或密码错误'));
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
+          }
+        }
+      } catch (err) {
+        alert('登录网络异常: ' + err.message);
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalText;
+        }
+      }
+    }, true);
   }
 
 

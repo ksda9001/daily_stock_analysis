@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const storageKey = 'theme';
+        const root = document.documentElement;
+        const storedTheme = localStorage.getItem(storageKey);
+        const theme = storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : 'dark';
+        root.classList.remove('light', 'dark');
+        root.classList.add(theme);
+        root.style.colorScheme = theme;
+      })();
+    </script>
+    <title>dsa-web</title>
+    <script type="module" crossorigin src="/assets/index-v20260912.js?v=20260912"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-BzB2o5Ol.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-DfNvL7Zg.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-DhBJGJuV.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-router-DUil8rt8.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-BT0S7SrH.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="/dsa-wechat.js?v=20260912_3"></script>
+  </body>
+</html>
