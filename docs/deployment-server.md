@@ -587,3 +587,87 @@ open('/tmp/token','w').write(issue_token(1, 2, ttl_seconds=3600))"   # user_id=1
 
 > 教训：**用 `docker cp` 打的热补丁不算部署完成。** 每次 `docker cp` 之后都要问一句
 > 「这个文件重建后会回来吗？」，不会就补进 `Dockerfile.patch`。
+
+### 10.5 配色不一致：注入层把「裸 HSL 三元组」当颜色用
+
+**症状**：注入的侧边栏条目（用户管理 / 绑定微信 / 个人通知）**悬浮时文字变白**，
+浅色主题下白字压浅底，标签几乎不可见 —— 和原生条目（首页 / 问股 / …）明显不同。
+
+根因有两层，都要知道：
+
+**① 裸三元组不能直接当颜色。** `index.css` 里的 `--secondary-text` / `--primary` /
+`--foreground` 存的是**裸 HSL 三元组**（如 `224 18% 28%`），设计上要套在 `hsl()` 里用。
+注入层写的是 `color: var(--secondary-text, #9ca3af);` —— `var()` 是**文本替换**，
+这条声明变成 `color: 224 18% 28%`，非法值。关键点：**变量「已定义」时 `var()` 的
+fallback 不会兜底**；声明只是「计算期失效」，`color` 于是退化成**继承**，取到父级
+`<aside>` 的 `foreground`。这就是注入项文字比原生项更亮的原因。
+
+> 判据：`CSS.supports('color', '224 18% 28%')` → `false`；
+> `CSS.supports('color', 'hsl(224 18% 28%)')` → `true`。
+
+**② 注入层是无层级样式，会压过 Tailwind 的 `@layer utilities`。**
+Tailwind v4 把工具类放在 `@layer utilities` 里，而项目自己的
+`.text-secondary-text{color:var(--text-secondary-text)}` 是**无层级**规则。
+**无层级胜过有层级，与具体性无关。** 后果有两条：
+
+- 原生的 `hover:text-foreground`（在 `@layer utilities` 里）**实际从未生效** ——
+  原生条目悬浮时**文字颜色不变**，只有背景高亮。
+- 注入层是无层级 `<style>`，所以在它里面写 `color:#fff` 会**真的生效**，
+  于是两边表现不一致。
+
+**✅ 正确改法**（都在注入层内）：颜色一律包 `hsl()`；并且 **hover 刻意与 idle 同色**，
+对齐的是**原生实际渲染结果**，不是代码意图：
+
+```css
+.dsa-sidebar-item        { color: hsl(var(--secondary-text, 224 18% 28%)); }
+.dsa-sidebar-item:hover  { background: var(--nav-hover-bg, hsl(var(--primary, 193 100% 43%) / 0.05));
+                           color: hsl(var(--secondary-text, 224 18% 28%)); }
+.dsa-sidebar-item.active { color: hsl(var(--foreground)); }  /* 原生 active 渲染出来是 foreground，不是 primary */
+aside .dsa-sidebar-item  { gap: 10px; }                      /* 原生 rail 用 gap-2.5 = 10px */
+```
+
+> 原生 active 项想用的 `text-[hsl(var(--primary))]` 同样被无层级的 `a{color:inherit}`
+> 压过 —— 这是**上游既有行为，跟随它，不要「顺手修好」**，否则注入项又会和原生项不一致。
+
+### 10.6 ⚠️ 测悬浮效果：headless Chrome 默认 `(hover: none)`
+
+**这是最容易得出错误结论的地方。** Tailwind v4 把每个 `hover:` 变体包在
+`@media (hover: hover)` 里，而 **headless Chrome 默认报告 `(hover: none)` /
+`(pointer: coarse)`**。结果：原生元素的 hover 样式**永不生效**，而注入层里的裸
+`:hover`（无媒体查询）**照样生效** —— 任何「悬浮前后对比」都会产生**假差异**。
+
+Chromium 启动必须带：
+
+```bash
+--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4
+# 2 = hover, 4 = fine pointer
+```
+
+`Emulation.setEmulatedMedia` 覆盖 `hover` / `pointer` **无效**（那是 Blink 的
+device 特性，不是媒体仿真）。启动后自检，两项都必须是 `true`：
+
+```js
+matchMedia('(hover: hover)').matches; matchMedia('(pointer: fine)').matches;
+```
+
+另外两个坑：
+
+- **别用 `CSS.forcePseudoState` 强制 `:hover`**：它会污染 `:not(:hover)` 兄弟选择器，
+  且与注入脚本的 `setInterval(refreshUI, 500)` 打架，结果自相矛盾。
+  **改用真实 `Input.dispatchMouseEvent`，并轮询 `el.matches(':hover')` 确认落地。**
+- **每跑一次探针要关掉 CDP target**（`/json/close/<id>`）。这台机器只有 2GB 内存，
+  残留几个 tab 就足以让下一次 `Runtime.evaluate` 超时。
+
+本次实测（注入项 vs 原生项，双主题各 9 项计算属性）：
+
+| 指标 | 修复前 | 修复后 | 原生 |
+|---|---|---|---|
+| light hover `color` | `rgb(255,255,255)` | `rgb(59,65,84)` | `rgb(59,65,84)` |
+| dark hover `color` | `rgb(255,255,255)` | `rgb(172,177,195)` | `rgb(172,177,195)` |
+| light idle `color` | `rgb(20,24,41)` | `rgb(59,65,84)` | `rgb(59,65,84)` |
+| `gap` | `8px` | `10px` | `10px` |
+| **与原生差异项** | `['color','gap']` | **无** | — |
+
+探针脚本：`probe_navitem.py`（测量 + 裁剪截图）、`compare_navitem.py`（前后对比表）、
+`inspect_navitem.py`（规则溯源，回答「这条颜色到底是谁设的」）、`layers_css.py`
+（判定某条规则属于哪个 `@layer`）。
