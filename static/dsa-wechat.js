@@ -50,8 +50,13 @@
     }
 
     /* 1. Sidebar scrolling: Logo and logout button stay anchored; ONLY the nav buttons scroll */
+    /* ⚠️ 不要在这里写 display: flex —— React 的 <aside> 靠 Tailwind 的
+       "hidden lg:flex" 做响应式显隐，而 .hidden 不带 !important，
+       会被 display: flex !important 压过，导致窗口缩到 lg(1024px) 以下时
+       桌面侧边栏不再隐藏。只补 flex-direction（display:none 时该属性无副作用）。
+       ⚠️ 本段 CSS 位于 JS 模板字面量内：注释里禁止出现反引号，否则会提前
+       终止模板字符串，整个注入脚本直接语法报错。 */
     aside {
-      display: flex !important;
       flex-direction: column !important;
     }
     aside > div {
@@ -75,6 +80,13 @@
     }
     aside nav::-webkit-scrollbar {
       display: none !important;
+    }
+    /* ⚠️ 主题/语言下拉是 nav 内部的绝对定位元素，会被 nav 的滚动容器裁掉
+       （表现为下拉右侧被切、勾选图标不完整）。
+       菜单打开时临时放开裁剪，让下拉能完整溢出侧边栏。 */
+    aside:has([role="menu"]) > div,
+    aside:has([role="menu"]) nav {
+      overflow: visible !important;
     }
     aside > div > button {
       flex-shrink: 0 !important;
