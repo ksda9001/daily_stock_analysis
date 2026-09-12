@@ -187,7 +187,8 @@ class TenancyApiTests(unittest.TestCase):
             headers=alice,
         )
         self.assertEqual(written.status_code, 200, written.text)
-        self.assertEqual(sorted(written.json()["written"]), ["SCHEDULE_TIMES", "STOCK_LIST"])
+        # SCHEDULE_TIMES 是受保护的全局键，必须被静默拒绝
+        self.assertEqual(sorted(written.json()["written"]), ["STOCK_LIST"])
 
         alice_view = self.client.get("/api/v1/tenancy/settings", headers=alice).json()["settings"]
         self.assertEqual(alice_view["STOCK_LIST"]["value"], "600519,AAPL")
@@ -308,19 +309,13 @@ class TenancyApiTests(unittest.TestCase):
             headers=admin,
         )
         alice_id = created.json()["user"]["id"]
-        alice_token = self._token("alice", ALICE_PASSWORD)
-        self.client.put(
-            "/api/v1/tenancy/settings",
-            json={"settings": {"SCHEDULE_ENABLED": True, "SCHEDULE_TIMES": "09:30"}},
-            headers=self._auth(alice_token),
-        )
-
         response = self.client.get("/api/v1/tenancy/scheduler/users", headers=admin)
         self.assertEqual(response.status_code, 200)
         entries = {e["tenant_id"]: e for e in response.json()["users"]}
         self.assertIn(alice_id, entries)
+        # 全局统一定时调度：所有活跃用户都参与，时间不落在用户身上
         self.assertTrue(entries[alice_id]["schedule_enabled"])
-        self.assertEqual(entries[alice_id]["schedule_times"], ["09:30"])
+        self.assertIsNone(entries[alice_id]["schedule_times"])
 
     def test_health_endpoint(self) -> None:
         # /health 会暴露 scope 内部状态与用户数，因此需要认证

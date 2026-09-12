@@ -36,12 +36,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from src.tenancy.context import ROLE_ADMIN, SYSTEM_TENANT_ID
+from src.tenancy.context import ROLE_ADMIN, SHARED_TENANT_ID, SYSTEM_TENANT_ID
 from src.tenancy.models import TenantUser, TenantUserSetting, TenantAuditLog
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,23 @@ GLOBAL_TABLES: frozenset = frozenset({
     "schema_migrations",
 })
 
+#: 「表内的共享行」规则 —— 表名 → ``(列名, 值)``。
+#:
+#: 适用场景：**一张表里既有用户私有行、又有公共行**，无法整表归入
+#: :data:`GLOBAL_TABLES`。典型是大盘复盘：``analysis_history`` 同时装着
+#: 每个人的个股研报（私有）和每日大盘复盘（公共）。
+#:
+#: 命中的行会被盖上 :data:`~src.tenancy.context.SHARED_TENANT_ID`，
+#: 并对**所有租户可读**（写权限见 :func:`src.tenancy.scope._apply_loader_criteria`
+#: 的说明：SELECT/UPDATE 放开，DELETE 仅管理员）。
+#:
+#: ⚠️ 判定式必须只依赖**列属性**，因为同一个规则要同时用于：
+#: ORM 类（``cls.report_type``）、Core ``Table``（``table.c["report_type"]``）
+#: 和 Python 实例（``obj.report_type``）。
+SHARED_ROW_RULES: Dict[str, Tuple[str, str]] = {
+    "analysis_history": ("report_type", "market_review"),
+}
+
 TENANT_COLUMN = "tenant_id"
 _TENANT_TABLES = (TenantUser, TenantUserSetting, TenantAuditLog)
 
@@ -108,6 +125,7 @@ class SchemaReport:
     columns_added: List[str] = field(default_factory=list)
     indexes_added: List[str] = field(default_factory=list)
     rows_backfilled: Dict[str, int] = field(default_factory=dict)
+    rows_shared: Dict[str, int] = field(default_factory=dict)
     system_owner_created: bool = False
     warnings: List[str] = field(default_factory=list)
 
@@ -119,6 +137,7 @@ class SchemaReport:
             or self.indexes_added
             or self.system_owner_created
             or any(self.rows_backfilled.values())
+            or any(self.rows_shared.values())
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -127,6 +146,7 @@ class SchemaReport:
             "columns_added": self.columns_added,
             "indexes_added": self.indexes_added,
             "rows_backfilled": self.rows_backfilled,
+            "rows_shared": self.rows_shared,
             "system_owner_created": self.system_owner_created,
             "warnings": self.warnings,
             "changed": self.changed,
@@ -213,6 +233,43 @@ def ensure_tenancy_schema(
         except Exception as exc:  # noqa: BLE001
             report.warnings.append(f"failed to backfill {table_name}: {exc}")
             logger.error("[tenancy] failed to backfill %s: %s", table_name, exc)
+
+    # ---- 4b. 共享行归位 ----------------------------------------------
+    # 必须排在步骤 4 之后：步骤 4 会把 NULL 归给系统属主，而共享行
+    # （如大盘复盘）不属于任何人，需要在之后单独搬到 SHARED_TENANT_ID。
+    inspector = inspect(engine)
+    for table_name, (column, value) in sorted(SHARED_ROW_RULES.items()):
+        if not inspector.has_table(table_name):
+            report.warnings.append(f"shared-row table missing, skipped: {table_name}")
+            continue
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if column not in existing_columns or TENANT_COLUMN not in existing_columns:
+            report.warnings.append(
+                f"shared-row table {table_name} lacks {column}/{TENANT_COLUMN}, skipped"
+            )
+            continue
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        f'UPDATE "{table_name}" SET tenant_id = :shared '
+                        f'WHERE "{column}" = :value '
+                        f"AND ({TENANT_COLUMN} IS NULL OR {TENANT_COLUMN} != :shared)"
+                    ),
+                    {"shared": int(SHARED_TENANT_ID), "value": value},
+                )
+            count = int(result.rowcount or 0)
+            if count:
+                report.rows_shared[table_name] = count
+                logger.info(
+                    "[tenancy] moved %d shared row(s) in %s to tenant_id=%d",
+                    count,
+                    table_name,
+                    SHARED_TENANT_ID,
+                )
+        except Exception as exc:  # noqa: BLE001
+            report.warnings.append(f"failed to mark shared rows in {table_name}: {exc}")
+            logger.error("[tenancy] failed to mark shared rows in %s: %s", table_name, exc)
 
     # ---- 5. 播种系统属主 ---------------------------------------------
     if create_system_owner:

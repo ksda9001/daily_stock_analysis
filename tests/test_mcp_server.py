@@ -279,6 +279,62 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(len(out["content"][:500]), 500)
         self.assertIn("已截断", out["content"])
 
+    # -- 大盘复盘（公共数据） ---------------------------------------------
+
+    def test_trigger_market_review_path_and_body(self):
+        dsa_tools.trigger_market_review(self.client, region="cn", send_notification=True)
+        self.assertEqual(self.rec.last["method"], "POST")
+        self.assertEqual(self.rec.last["path"], "/api/v1/analysis/market-review")
+        self.assertEqual(self.rec.last["body"], {"region": "cn", "send_notification": True})
+
+    def test_trigger_market_review_omits_blank_region(self):
+        dsa_tools.trigger_market_review(self.client)
+        body = self.rec.last["body"]
+        self.assertNotIn("region", body, "留空应让服务端用默认区域")
+        self.assertEqual(body["send_notification"], False)
+
+    def test_list_market_reviews_filters_by_report_type(self):
+        dsa_tools.list_market_reviews(self.client, limit=5)
+        query = self.rec.last["query"]
+        self.assertEqual(self.rec.last["path"], "/api/v1/history")
+        self.assertEqual(query["report_type"], "market_review")
+        self.assertEqual(query["limit"], "5")
+
+    def test_latest_market_review_fetches_markdown(self):
+        rec = Recorder(
+            {
+                ("GET", "/api/v1/history"): httpx.Response(
+                    200,
+                    json={
+                        "total": 1,
+                        "items": [
+                            {"id": 42, "report_type": "market_review", "created_at": "T1"}
+                        ],
+                    },
+                ),
+                ("GET", "/api/v1/history/42/markdown"): httpx.Response(
+                    200, json={"content": "# 大盘复盘\n今日..."}
+                ),
+            }
+        )
+        out = dsa_tools.get_latest_market_review(build_client(rec))
+        self.assertTrue(out["found"])
+        self.assertEqual(out["record_id"], 42)
+        self.assertIn("大盘复盘", out["content"])
+        self.assertEqual(
+            rec.paths, ["/api/v1/history", "/api/v1/history/42/markdown"]
+        )
+
+    def test_latest_market_review_returns_found_false_when_empty(self):
+        """「还没复盘过」是正常状态，不该抛异常。"""
+        rec = Recorder(
+            {("GET", "/api/v1/history"): httpx.Response(200, json={"total": 0, "items": []})}
+        )
+        out = dsa_tools.get_latest_market_review(build_client(rec))
+        self.assertFalse(out["found"])
+        self.assertIn("trigger_market_review", out["message"])
+        self.assertEqual(rec.paths, ["/api/v1/history"], "无记录时不应再请求正文")
+
     # -- 选股 -------------------------------------------------------------
 
     def test_screening_strategies_path(self):
@@ -392,9 +448,12 @@ class ServerTests(unittest.TestCase):
             "get_my_usage",
             "get_usage_summary",
             "get_stock_quote",
+            "get_latest_market_review",
+            "list_market_reviews",
+            "trigger_market_review",
         }
         self.assertTrue(required.issubset(names), f"缺少工具: {required - names}")
-        self.assertEqual(len(names), 26)
+        self.assertEqual(len(names), 29)
 
     def test_tool_failure_returns_structured_json_not_exception(self):
         rec = Recorder(

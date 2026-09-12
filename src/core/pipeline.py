@@ -97,6 +97,7 @@ from src.services.decision_signal_extractor import (
 )
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus
 from src.services.decision_signal_summary import summarize_decision_signal
+from src.utils.context_exec import submit_with_context
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import (
@@ -3537,7 +3538,8 @@ class StockAnalysisPipeline:
                 }
                 if target is not None:
                     submit_kwargs["analysis_target"] = target
-                future = executor.submit(
+                future = submit_with_context(
+                    executor,
                     self.process_single_stock,
                     code,
                     **submit_kwargs,

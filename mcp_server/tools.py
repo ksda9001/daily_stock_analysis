@@ -129,6 +129,80 @@ def get_report_markdown(
 
 
 # ---------------------------------------------------------------------------
+# 大盘复盘（公共数据）
+# ---------------------------------------------------------------------------
+#
+# 大盘复盘与个股研报不同：它**不属于任何用户**，所有账号都能读到同一份
+# （服务端用 ``SHARED_TENANT_ID`` 标记，见 ``src/tenancy/schema.py`` 的
+# ``SHARED_ROW_RULES``）。所以这里不需要「按用户」的语义，读取时也不必
+# 关心是谁触发的。
+
+MARKET_REVIEW_REPORT_TYPE = "market_review"
+
+
+def trigger_market_review(
+    client: DSAClient,
+    *,
+    region: Optional[str] = None,
+    send_notification: bool = False,
+) -> Dict[str, Any]:
+    """触发大盘复盘（异步，立即返回 task_id）。
+
+    大盘复盘是**公共数据**：完成后所有账号都能读到同一份报告。
+    接口本身有进程内防重，重复触发会返回 409。
+
+    :param region: 市场区域，如 ``cn`` / ``us``；留空用服务端配置的默认值
+    :param send_notification: 完成后是否按全局配置推送通知
+    """
+    body: Dict[str, Any] = {"send_notification": bool(send_notification)}
+    if region:
+        body["region"] = str(region).strip()
+    return client.post(
+        "/api/v1/analysis/market-review", json_body=body, timeout=120.0
+    )
+
+
+def list_market_reviews(client: DSAClient, *, limit: int = 10) -> Dict[str, Any]:
+    """列出最近的大盘复盘记录（公共数据，所有人可见）。"""
+    return client.get(
+        "/api/v1/history",
+        params={
+            "report_type": MARKET_REVIEW_REPORT_TYPE,
+            "page": 1,
+            "limit": max(1, min(int(limit), 100)),
+        },
+    )
+
+
+def get_latest_market_review(
+    client: DSAClient, *, max_chars: int = 24000
+) -> Dict[str, Any]:
+    """直接取最近一次大盘复盘的 Markdown 原文。
+
+    这是「我想看看今天大盘怎么样」的一站式入口 —— 内部先列记录再取正文，
+    省掉调用方自己串两次请求。没有任何记录时返回 ``{"found": False}``，
+    **不抛异常**（「还没复盘过」是正常状态，不是错误）。
+    """
+    listing = list_market_reviews(client, limit=1)
+    items = listing.get("items") or []
+    if not items:
+        return {
+            "found": False,
+            "message": "还没有大盘复盘记录，可用 trigger_market_review 触发一次",
+        }
+
+    record = items[0]
+    record_id = record.get("id")
+    payload = client.get(f"/api/v1/history/{record_id}/markdown")
+    limited = _limit_payload(payload, max_chars)
+    if isinstance(limited, dict):
+        limited.setdefault("found", True)
+        limited.setdefault("record_id", record_id)
+        limited.setdefault("created_at", record.get("created_at"))
+    return limited
+
+
+# ---------------------------------------------------------------------------
 # 2. 自选股（按用户）
 # ---------------------------------------------------------------------------
 

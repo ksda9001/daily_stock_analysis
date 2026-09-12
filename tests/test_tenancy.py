@@ -491,8 +491,6 @@ class UserSettingsTests(TenancyTestBase):
             user.id,
             {
                 "STOCK_LIST": "600519, aapl ,600519",
-                "SCHEDULE_ENABLED": True,
-                "SCHEDULE_TIMES": ["09:30", "15:05"],
                 "WECHAT_WEBHOOK_URL": "https://example.com/hook",
             },
         )
@@ -500,8 +498,27 @@ class UserSettingsTests(TenancyTestBase):
 
         raw = load_user_settings(user.id)
         self.assertEqual(raw["STOCK_LIST"], "600519,AAPL", "代码应大写并去重")
-        self.assertEqual(raw["SCHEDULE_ENABLED"], "true")
-        self.assertEqual(raw["SCHEDULE_TIMES"], "09:30,15:05")
+        self.assertEqual(raw["WECHAT_WEBHOOK_URL"], "https://example.com/hook")
+
+    def test_schedule_keys_are_rejected_as_user_settings(self) -> None:
+        """定时调度是管理员全局权限，不得成为个人设置。
+
+        与 :data:`src.tenancy.settings._FORBIDDEN_KEYS` 对应。早期版本允许
+        按用户配置调度时间，该能力已被**有意移除**（避免同一时间点重复
+        拉取数据源），因此这里断言的是「被拒绝」而不是「能存进去」。
+        """
+        from src.tenancy.settings import load_user_settings, save_user_settings
+
+        user = tenancy_service.create_user(username="judy-sched", password="pass1234")
+        written = save_user_settings(
+            user.id,
+            {"SCHEDULE_ENABLED": True, "SCHEDULE_TIMES": ["09:30", "15:05"]},
+        )
+        self.assertEqual(written, {}, "调度键必须被拒绝")
+
+        raw = load_user_settings(user.id)
+        self.assertNotIn("SCHEDULE_ENABLED", raw)
+        self.assertNotIn("SCHEDULE_TIMES", raw)
 
     def test_forbidden_keys_rejected(self) -> None:
         from src.tenancy.settings import load_user_settings, save_user_settings
@@ -553,7 +570,6 @@ class UserSettingsTests(TenancyTestBase):
             {
                 "STOCK_LIST": "600519,AAPL",
                 "WECHAT_WEBHOOK_URL": "https://user.example/hook",
-                "SCHEDULE_TIMES": "09:30",
             },
         )
 
@@ -565,7 +581,11 @@ class UserSettingsTests(TenancyTestBase):
         self.assertIsNot(effective, base, "必须返回副本，不能污染全局 Config")
         self.assertEqual(effective.stock_list, ["600519", "AAPL"])
         self.assertEqual(effective.wechat_webhook_url, "https://user.example/hook")
-        self.assertEqual(effective.schedule_times, ["09:30"])
+        self.assertEqual(
+            effective.schedule_times,
+            base.schedule_times,
+            "调度时间是全局管理员权限，用户覆盖不得生效",
+        )
 
         # 原对象保持不变
         self.assertEqual(base.stock_list, ["GLOBAL1"])
@@ -674,54 +694,60 @@ class PerUserScheduleTests(TenancyTestBase):
         active = tenancy_service.create_user(username="rita", password="pass1234")
         disabled = tenancy_service.create_user(username="sam", password="pass1234")
         tenancy_service.update_user(disabled.id, status="disabled")
-        save_user_settings(active.id, {"SCHEDULE_ENABLED": True, "SCHEDULE_TIMES": "09:30"})
 
         entries = tenancy_service.list_schedulable_users()
         ids = {e["tenant_id"] for e in entries}
         self.assertIn(active.id, ids)
-        self.assertNotIn(disabled.id, ids)
+        self.assertNotIn(disabled.id, ids, "已禁用用户不应参与定时分析")
 
         entry = next(e for e in entries if e["tenant_id"] == active.id)
         self.assertTrue(entry["schedule_enabled"])
-        self.assertEqual(entry["schedule_times"], ["09:30"])
+        self.assertIsNone(
+            entry["schedule_times"],
+            "全局统一定时调度：时间跟随系统配置，不落在用户身上",
+        )
 
-    def test_scheduler_registers_named_daily_tasks(self) -> None:
+    def test_no_per_user_named_daily_tasks(self) -> None:
+        """全局统一定时调度：不再为任何用户注册独立的每日任务。
+
+        调度时间由管理员在全局配置，所有活跃用户在全局时间点统一扇出
+        （见 ``_tenant_fanout_targets``），因此「按用户的命名任务」应当为空。
+        """
         from src.scheduler import Scheduler
         from src.services.runtime_scheduler import RuntimeSchedulerService
-        from src.tenancy.settings import save_user_settings
 
-        user = tenancy_service.create_user(username="tina", password="pass1234")
-        save_user_settings(user.id, {"SCHEDULE_ENABLED": True, "SCHEDULE_TIMES": "09:30,15:05"})
+        tenancy_service.create_user(username="tina", password="pass1234")
 
         scheduler = Scheduler(register_signals=False)
         svc = RuntimeSchedulerService(owns_schedule=True)
         registered = svc._register_tenant_schedules(scheduler, generation=0)  # noqa: SLF001
 
-        self.assertEqual(registered, [f"tenant-{user.id}"])
-        self.assertEqual(scheduler.named_daily_task_names(), [f"tenant-{user.id}"])
-        # 两个时间点 → 两个 job
-        self.assertEqual(len(scheduler._named_daily_jobs[f"tenant-{user.id}"]), 2)  # noqa: SLF001
+        self.assertEqual(registered, [], "全局调度下不应有按用户的独立时间表")
+        self.assertEqual(scheduler.named_daily_task_names(), [])
 
         scheduler.stop()
         self.assertEqual(scheduler.named_daily_task_names(), [])
 
-    def test_fanout_targets_exclude_personal_schedules(self) -> None:
-        from src.services.runtime_scheduler import RuntimeSchedulerService
-        from src.tenancy.settings import save_user_settings
+    def test_fanout_targets_cover_all_active_users(self) -> None:
+        """全局统一调度：所有活跃用户都在扇出目标里，禁用用户被排除。
 
-        follower = tenancy_service.create_user(username="uma", password="pass1234")
-        personal = tenancy_service.create_user(username="vic", password="pass1234")
-        opted_out = tenancy_service.create_user(username="wes", password="pass1234")
-        save_user_settings(personal.id, {"SCHEDULE_ENABLED": True, "SCHEDULE_TIMES": "09:30"})
-        save_user_settings(opted_out.id, {"SCHEDULE_ENABLED": False})
+        个人调度时间已不可配置，所以这里没有「有个人时间表所以被排除」
+        这种情况；唯一的排除条件是账号被禁用。
+        """
+        from src.services.runtime_scheduler import RuntimeSchedulerService
+
+        first = tenancy_service.create_user(username="uma", password="pass1234")
+        second = tenancy_service.create_user(username="vic", password="pass1234")
+        disabled = tenancy_service.create_user(username="wes", password="pass1234")
+        tenancy_service.update_user(disabled.id, status="disabled")
 
         svc = RuntimeSchedulerService(owns_schedule=True)
         targets = svc._tenant_fanout_targets()  # noqa: SLF001
 
-        self.assertIn(follower.id, targets)
+        self.assertIn(first.id, targets)
+        self.assertIn(second.id, targets)
         self.assertIn(SYSTEM_TENANT_ID, targets)
-        self.assertNotIn(personal.id, targets, "有个人时间表的用户不应被全局扇出重复执行")
-        self.assertNotIn(opted_out.id, targets, "显式关闭调度的用户不应被执行")
+        self.assertNotIn(disabled.id, targets, "已禁用的用户不应被执行")
 
     def test_single_user_mode_has_no_tenant_schedules(self) -> None:
         from src.services.runtime_scheduler import RuntimeSchedulerService

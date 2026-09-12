@@ -97,10 +97,14 @@ def effective_tenant_id() -> int:
 **这是整个隔离体系的唯一归属判定函数。** 多用户模式下上下文缺失时会**收窄**到系统属主，
 而不是**放宽**到全部数据——这是刻意的 fail-closed 设计。
 
+唯一的例外是**共享行**（见 §4.3）：那不是「放宽」，而是这类数据本来就不属于任何用户。
+
 ### 3.3 写入归属
 
 `before_flush` 事件为所有新增的租户表对象盖上 `tenant_id` 戳。
 业务代码不需要显式赋值，也不可能忘记。
+
+命中共享行规则的对象盖 `SHARED_TENANT_ID`（`0`），其余盖当前租户。
 
 ### 3.4 逃生舱
 
@@ -122,7 +126,9 @@ with bypass_tenant_scope("monthly cross-tenant report"):
 | ORM 查询（`session.query` / `session.execute(select(...))`） | ✅ | 覆盖业务代码的全部查询路径 |
 | ORM 写入 | ✅ | `before_flush` 盖章 |
 | 裸 SQL（`connection.execute(text(...))`） | ⚠️ 仅审计 | 默认告警一次；`DSA_TENANCY_STRICT_RAW_SQL=true` 时直接报错 |
-| 全局市场数据表 | ➖ 不隔离 | 见 §4 |
+| 全局市场数据表 | ➖ 不隔离 | 见 §4.2 |
+| 表内共享行（如大盘复盘） | ➖ 读不隔离 / 删仅管理员 | 见 §4.3 |
+| 后台线程提交的任务 | ⚠️ 需显式传播上下文 | 见 §3.6 |
 
 裸 SQL 之所以不做改写：可靠地改写任意 SQL 需要完整的 SQL 解析器，
 收益不抵复杂度。上游仅在 `DatabaseManager.__init__` 的迁移阶段使用裸 SQL，
@@ -156,7 +162,36 @@ with bypass_tenant_scope("monthly cross-tenant report"):
 
 代价是「用户 A 抓到的新闻用户 B 也能看到」——对公开市场数据而言可接受。
 
-### 4.3 ⚠️ 命名冲突提醒
+### 4.3 表内共享行（公共数据）
+
+有些表**既装私有行也装公共行**，无法整表归入 §4.2。典型是 `analysis_history`：
+它同时装着每个人的个股研报（私有）和每日**大盘复盘**（公共）。
+
+这类行由 `src/tenancy/schema.py` 的 `SHARED_ROW_RULES` 声明：
+
+```python
+SHARED_ROW_RULES = {
+    "analysis_history": ("report_type", "market_review"),
+}
+```
+
+命中规则的行归属为 `SHARED_TENANT_ID`（默认 `0`，可用 `DSA_SHARED_TENANT_ID` 覆盖），
+并且按语句类型分级放开：
+
+| 语句 | 共享行是否参与匹配 | 理由 |
+|---|---|---|
+| `SELECT` | ✅ 所有租户可见 | 「共有数据」的定义 |
+| `UPDATE` | ✅ 所有租户可改 | 后台任务需维护公共报告；HTTP 层没有更新入口 |
+| `DELETE` | ⚠️ **仅管理员** | 否则任一普通用户就能删掉公共报告 |
+
+写入时 `before_flush` 会自动盖 `SHARED_TENANT_ID`，业务代码无需关心。
+启动迁移（`ensure_tenancy_schema` 步骤 4b）会把历史遗留的共享行搬到该归属下，幂等。
+
+> **判定式必须只依赖列属性**，因为同一个规则要同时用于 ORM 类（`cls.report_type`）、
+> Core `Table`（`table.c["report_type"]`）和 Python 实例（`obj.report_type`）。
+> ⚠️ Core `Table` **不代理属性访问**，写成 `table.report_type` 会抛 `AttributeError`。
+
+### 4.4 ⚠️ 命名冲突提醒
 
 上游 `portfolio_accounts` **已有一个** `owner_id = Column(String(64))` 字段，
 语义是「账户持有人标签」（自由文本），被 `portfolio_service` / `portfolio_repo` 使用。

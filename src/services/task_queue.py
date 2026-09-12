@@ -34,6 +34,7 @@ from src.services.run_diagnostics import (
     reset_run_diagnostic_context,
 )
 from src.utils.analysis_metadata import SELECTION_SOURCES
+from src.utils.context_exec import submit_with_context
 from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 
 logger = logging.getLogger(__name__)
@@ -523,7 +524,8 @@ class AnalysisTaskQueue:
                 self._analyzing_stocks[dedupe_key] = task_id
 
                 try:
-                    future = self.executor.submit(
+                    future = submit_with_context(
+                        self.executor,
                         self._execute_task,
                         task_id,
                         stock_code,
@@ -587,7 +589,9 @@ class AnalysisTaskQueue:
                 raise ValueError(f"任务 ID 已存在: {task_id}")
             self._tasks[task_id] = task_info
             try:
-                future = self.executor.submit(self._execute_background_task, task_id, run_task)
+                future = submit_with_context(
+                    self.executor, self._execute_background_task, task_id, run_task
+                )
             except Exception:
                 del self._tasks[task_id]
                 raise

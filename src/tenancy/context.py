@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 #: 后台任务（调度器 / CLI）也以该身份运行。
 SYSTEM_TENANT_ID: int = int(os.environ.get("DSA_SYSTEM_TENANT_ID", "1"))
 
+#: 共享归属 ID —— 表示「这条数据不属于任何用户」。
+#:
+#: 与 :data:`SYSTEM_TENANT_ID` 的区别在**语义**而非机制：
+#: ``SYSTEM_TENANT_ID`` 是「归属到系统属主这个人」（只有他能看），
+#: ``SHARED_TENANT_ID`` 是「无归属的公共数据」（**所有租户可读**）。
+#:
+#: 哪些表的哪些行算共享，由 :data:`src.tenancy.schema.SHARED_ROW_RULES`
+#: 声明；判定规则刻意不写死在隔离层里，以免隔离逻辑耦合业务语义。
+SHARED_TENANT_ID: int = int(os.environ.get("DSA_SHARED_TENANT_ID", "0"))
+
 #: 角色常量
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"

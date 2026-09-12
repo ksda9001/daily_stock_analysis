@@ -350,7 +350,17 @@ def delete_history_by_code(
 
             batch_deleted = db_manager.delete_analysis_history_records(record_ids)
             if batch_deleted == 0:
-                raise RuntimeError("history deletion made no progress")
+                # 查得到却删不掉 —— 这是租户可见性与删除权不一致时的正常
+                # 边界：共享行（如大盘复盘）对所有租户可读，但删除权收口
+                # 到管理员。继续循环只会反复取到同一批记录，因此必须跳出。
+                # 把它当成错误会让普通用户「按代码清理历史」直接 500。
+                logger.info(
+                    "按股票代码删除历史记录：%d 条记录对当前用户不可删除"
+                    "（多为共享数据，删除权仅管理员持有），已跳过。stock_code=%s",
+                    len(record_ids),
+                    stock_code,
+                )
+                break
             deleted += batch_deleted
 
             if len(records) < _DELETE_BY_CODE_BATCH_SIZE:

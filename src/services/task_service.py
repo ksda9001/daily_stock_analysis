@@ -25,6 +25,7 @@ from src.storage import get_db
 from bot.models import BotMessage
 from src.services.stock_code_utils import resolve_index_stock_code_for_analysis
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus
+from src.utils.context_exec import submit_with_context
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +113,9 @@ class TaskService:
 
         task_id = f"{normalized_code}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
-        # 提交到线程池
-        self.executor.submit(
+        # 提交到线程池（必须携带上下文，否则多租户归属会退化为系统属主）
+        submit_with_context(
+            self.executor,
             self._run_analysis,
             normalized_code,
             task_id,

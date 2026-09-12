@@ -205,6 +205,41 @@ def get_report_markdown(record_id: int, max_chars: int = 24000) -> str:
     return _call(tools.get_report_markdown, record_id=record_id, max_chars=max_chars)
 
 
+@server.tool()
+def get_latest_market_review(max_chars: int = 24000) -> str:
+    """读取最近一次**大盘复盘**的完整报告。
+
+    大盘复盘是公共数据，所有账号看到的是同一份。适合回答
+    「今天大盘怎么样」「最近市场什么情况」这类问题。
+    若从未复盘过，会返回 found=false 而不是报错。
+    """
+    return _call(tools.get_latest_market_review, max_chars=max_chars)
+
+
+@server.tool()
+def list_market_reviews(limit: int = 10) -> str:
+    """列出最近的大盘复盘记录（公共数据）。"""
+    return _call(tools.list_market_reviews, limit=limit)
+
+
+@server.tool()
+def trigger_market_review(region: str = "", send_notification: bool = False) -> str:
+    """触发一次**大盘复盘**（异步，立即返回 task_id）。
+
+    复盘耗时较长，返回 task_id 后用 get_analysis_task 查询进度；
+    完成后用 get_latest_market_review 取正文。
+    正在执行时重复触发会返回 409。
+
+    :param region: 市场区域，如 cn / us；留空用服务端默认
+    :param send_notification: 完成后是否按全局配置推送通知
+    """
+    return _call(
+        tools.trigger_market_review,
+        region=region or None,
+        send_notification=send_notification,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. 自选股
 # ---------------------------------------------------------------------------

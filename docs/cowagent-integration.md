@@ -193,7 +193,7 @@ CowAgent 容器里的 `127.0.0.1` 是它自己，不是 DSA。同网络下直接
 
 ---
 
-## 5. 工具清单（26 个）
+## 5. 工具清单（29 个）
 
 | 能力 | 工具 |
 |---|---|
@@ -382,8 +382,8 @@ docker exec -u agent cowagent python -c \
 
 ```bash
 docker logs cowagent 2>&1 | grep -i mcp
-# 期望： [MCP] Server 'dsa' ready — 26 tool(s)
-#        [ToolManager] MCP loading complete: 1/1 server(s) ready, 26 tool(s) available
+# 期望： [MCP] Server 'dsa' ready — 29 tool(s)
+#        [ToolManager] MCP loading complete: 1/1 server(s) ready, 29 tool(s) available
 ```
 
 ---

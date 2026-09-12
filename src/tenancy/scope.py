@@ -21,6 +21,16 @@
 请求路径上，中间件保证一定会绑定身份；后台任务（调度器 / CLI）通过
 :func:`src.tenancy.context.bind_user` 显式绑定，或退化为系统属主。
 
+唯一的例外是**共享行**（见下节）——那不是「放宽」，而是这类数据
+**本来就不属于任何用户**。
+
+共享行（公共数据）
+------------------
+有些表既装私有行也装公共行，无法整表归入 ``GLOBAL_TABLES``。这类行由
+:data:`src.tenancy.schema.SHARED_ROW_RULES` 声明，归属恒为
+:data:`~src.tenancy.context.SHARED_TENANT_ID`，并且 SELECT/UPDATE 对所有
+租户放开、**DELETE 仅管理员**。详见 :func:`_tenant_predicate`。
+
 已知边界
 --------
 ``do_orm_execute`` 只覆盖 ORM 语句。绕过 ORM 的裸 SQL
@@ -39,18 +49,21 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional, Set
 
-from sqlalchemy import event
+from sqlalchemy import event, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, with_loader_criteria
+from sqlalchemy.sql.dml import Insert
 from sqlalchemy.sql.schema import Table
 
 from src.tenancy.context import (
+    SHARED_TENANT_ID,
     SYSTEM_TENANT_ID,
     current_user_id,
+    is_admin_context,
     multiuser_enabled,
     scope_bypassed,
 )
-from src.tenancy.schema import SCOPED_TABLES
+from src.tenancy.schema import SHARED_ROW_RULES, SCOPED_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +134,79 @@ def is_guard_armed() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 共享行（公共数据）
+# ---------------------------------------------------------------------------
+#
+# 有些表**既装私有行也装公共行**，无法整表放进 GLOBAL_TABLES。
+# 典型是大盘复盘：``analysis_history`` 里既有每个人的个股研报（私有），
+# 也有每日大盘复盘（公共）。这类「共享行」由
+# :data:`src.tenancy.schema.SHARED_ROW_RULES` 声明，归属恒为
+# :data:`SHARED_TENANT_ID`，并且：
+#
+#   SELECT  → 所有租户可见
+#   UPDATE  → 所有租户可改（HTTP 层没有更新入口，仅后台任务使用）
+#   DELETE  → **仅管理员**（否则任一普通用户就能删掉公共报告）
+#
+# 这个分级是刻意的：放宽读是为了「共有数据」，但删除权必须收口。
+
+def _resolve_column(provider, column_name: str):
+    """取出列表达式，兼容 ORM 类与 Core ``Table``。
+
+    - ORM 类：``cls.tenant_id``（instrumented attribute）
+    - Core ``Table``：``table.c["tenant_id"]``
+
+    ⚠️ ``Table`` **不代理属性访问**，所以 ``table.tenant_id`` 会抛
+    ``AttributeError``。这个分支不是洁癖，是实测踩出来的。
+    """
+    target = getattr(provider, column_name, None)
+    if target is None and hasattr(provider, "c"):
+        try:
+            target = provider.c[column_name]
+        except (KeyError, TypeError):
+            return None
+    return target
+
+
+def _shared_row_criteria(provider, table_name: str):
+    """构造「该行属于共享数据」的 SQL 谓词；无规则时返回 ``None``。"""
+    rule = SHARED_ROW_RULES.get(table_name)
+    if rule is None:
+        return None
+    column, value = rule
+    target = _resolve_column(provider, column)
+    if target is None:
+        return None
+    return target == value
+
+
+def _is_shared_row(instance, table_name: str) -> bool:
+    """Python 侧判定：某个待写入的对象是否属于共享行。"""
+    rule = SHARED_ROW_RULES.get(table_name)
+    if rule is None:
+        return False
+    column, value = rule
+    return getattr(instance, column, None) == value
+
+
+def _tenant_predicate(provider, table_name: str, tenant_id: int, op: str):
+    """为某张表生成归属谓词；无法解析 ``tenant_id`` 列时返回 ``None``。
+
+    ``op`` 取 ``"select" | "update" | "delete"``。共享行在 SELECT/UPDATE
+    上放宽到所有租户，DELETE 上仅管理员可及。
+    """
+    tenant_column = _resolve_column(provider, "tenant_id")
+    if tenant_column is None:
+        return None
+    base = tenant_column == tenant_id
+    shared = _shared_row_criteria(provider, table_name)
+    if shared is None:
+        return base
+    if op == "delete" and not is_admin_context():
+        return base
+    return or_(base, shared)
+
+
+# ---------------------------------------------------------------------------
 # 语句改写
 # ---------------------------------------------------------------------------
 
@@ -148,22 +234,41 @@ def _walk_froms(fromclause, out: Set[Table]) -> None:
 
 
 def _scoped_tables_in(stmt) -> Set[Table]:
-    """返回语句直接引用的租户表。"""
+    """返回语句直接引用的租户表。
+
+    ⚠️ ``Update`` / ``Delete`` 的 ``get_final_froms()`` 返回**空列表**，
+    目标表实际挂在 ``stmt.table`` 上。早期实现只看 ``get_final_froms()``，
+    于是 Core 的 ``update(table)`` / ``delete(table)`` **完全绕过**租户谓词 ——
+    一条不带 WHERE 的 ``DELETE FROM analysis_history`` 就能清空整张表，
+    且**跨租户生效**。这不是理论风险，是实测复现出来的。
+
+    旁证：裸 SQL 审计当时也会对这类语句报警（因为它确实没被约束）。
+    """
     found: Set[Table] = set()
+
+    # DML 语句的目标表不在 FROM 子句里。
+    dml_table = getattr(stmt, "table", None)
+    if isinstance(dml_table, Table):
+        found.add(dml_table)
+
     try:
         froms = stmt.get_final_froms()
     except Exception:  # noqa: BLE001 - 部分语句类型没有 FROM
-        return found
+        froms = ()
     for item in froms:
         _walk_froms(item, found)
+
     return {table for table in found if table.name in SCOPED_TABLES}
 
 
-def _apply_loader_criteria(stmt, tenant_id: int, mappers=()):
+def _apply_loader_criteria(stmt, tenant_id: int, mappers=(), op: str = "select"):
     """为语句中涉及的每个租户实体加上 ``tenant_id`` 谓词。
 
     ``mappers`` 来自 ``orm_execute_state.all_mappers``——注意它挂在
     **执行状态**上而不是语句对象上（``Select`` 没有 ``all_mappers``）。
+
+    ``op`` 是语句类型（``select`` / ``update`` / ``delete``），用于决定
+    共享行是否参与匹配（见 :func:`_tenant_predicate`）。
     """
     applied = False
     for mapper in mappers:
@@ -179,15 +284,21 @@ def _apply_loader_criteria(stmt, tenant_id: int, mappers=()):
                 table_name,
             )
             continue
+        shared = _shared_row_criteria(cls, table_name)
+        widen_shared = shared is not None and not (op == "delete" and not is_admin_context())
+
+        if widen_shared:
+            # SQLAlchemy 会把实体类作为参数传入 lambda，并把闭包变量提取为
+            # **绑定参数**，在语句执行时求值。每次执行都新建闭包，因此不会
+            # 串味到上一个请求的归属。
+            def _criteria(cls, _shared=shared):  # noqa: ANN001, B023
+                return or_(cls.tenant_id == tenant_id, _shared)
+        else:
+            def _criteria(cls):  # noqa: ANN001, B023
+                return cls.tenant_id == tenant_id
+
         stmt = stmt.options(
-            with_loader_criteria(
-                cls,
-                # SQLAlchemy 会把实体类作为参数传入 lambda，并把闭包变量
-                # ``tenant_id`` 提取为**绑定参数**，在语句执行时求值。
-                # 每次执行都新建 lambda，因此不会串味到上一个请求的归属。
-                lambda cls: cls.tenant_id == tenant_id,  # noqa: B023
-                include_aliases=True,
-            )
+            with_loader_criteria(cls, _criteria, include_aliases=True)
         )
         applied = True
 
@@ -199,7 +310,10 @@ def _apply_loader_criteria(stmt, tenant_id: int, mappers=()):
     for table in _scoped_tables_in(stmt):
         if "tenant_id" not in table.c:
             continue
-        stmt = stmt.where(table.c.tenant_id == tenant_id)
+        predicate = _tenant_predicate(table, table.name, tenant_id, op)
+        if predicate is None:
+            continue
+        stmt = stmt.where(predicate)
         applied = True
 
     return stmt
@@ -248,11 +362,18 @@ def _on_do_orm_execute(orm_execute_state) -> None:
         return
 
     tenant_id = effective_tenant_id()
+    if orm_execute_state.is_delete:
+        op = "delete"
+    elif orm_execute_state.is_update:
+        op = "update"
+    else:
+        op = "select"
     try:
         rewritten = _apply_loader_criteria(
             orm_execute_state.statement,
             tenant_id,
             getattr(orm_execute_state, "all_mappers", None) or (),
+            op,
         )
     except Exception as exc:  # noqa: BLE001 - 绝不因守卫异常放行
         logger.exception("[tenancy] failed to apply tenant criteria: %s", exc)
@@ -265,7 +386,11 @@ def _on_do_orm_execute(orm_execute_state) -> None:
 
 
 def _on_before_flush(session: Session, flush_context, instances) -> None:
-    """为新写入的对象盖上归属戳。"""
+    """为新写入的对象盖上归属戳。
+
+    共享行（如大盘复盘）盖 :data:`SHARED_TENANT_ID`，其余盖当前租户。
+    两者都用「尚未赋值」作为前置条件，因此显式传入的归属不会被覆盖。
+    """
     if not should_scope():
         return
     tenant_id = effective_tenant_id()
@@ -275,22 +400,55 @@ def _on_before_flush(session: Session, flush_context, instances) -> None:
             continue
         if not hasattr(obj, "tenant_id"):
             continue
-        if getattr(obj, "tenant_id", None) is None:
+        if getattr(obj, "tenant_id", None) is not None:
+            continue
+        if _is_shared_row(obj, table_name):
+            setattr(obj, "tenant_id", SHARED_TENANT_ID)
+        else:
             setattr(obj, "tenant_id", tenant_id)
+
+
+def _is_orm_tenant_insert(clauseelement) -> bool:
+    """判断语句是否为「ORM 写入租户表」产生的 INSERT。
+
+    这类语句的隔离**不依赖 WHERE 谓词**，而是由 :func:`_on_before_flush`
+    在 flush 前给对象盖上 ``tenant_id``。它们也不会经过
+    ``do_orm_execute``（flush 是会话内部操作），因此拿不到
+    :data:`_TENANCY_MARKER` —— 若不单独识别，就会被下面的裸 SQL 审计
+    误判。严格模式下这会表现为「**所有写入都失败**」，而且报错信息还会
+    建议「改用 ORM 路径」，而调用方本来就在用 ORM。
+
+    判据：语句是 ``Insert`` 且目标表带 ``tenant_id`` 列。裸写的
+    ``INSERT INTO t (code, ...)`` 不带该列，仍会被正常审计。
+    """
+    if not isinstance(clauseelement, Insert):
+        return False
+    table = getattr(clauseelement, "table", None)
+    columns = getattr(table, "c", None)
+    if columns is None:
+        return False
+    try:
+        return "tenant_id" in columns
+    except Exception:  # noqa: BLE001 - 列集合不可用时按「未识别」处理
+        return False
 
 
 def install_raw_sql_audit(engine: Engine) -> None:
     """审计绕过 ORM 的裸 SQL。
 
-    ORM 语句会在 :func:`_on_do_orm_execute` 中被打上标记，因此这里只关心
-    「未打标记且引用了租户表」的语句。默认仅告警一次；设置
-    ``DSA_TENANCY_STRICT_RAW_SQL=true`` 后直接报错。
+    ORM 的 SELECT / UPDATE / DELETE 会在 :func:`_on_do_orm_execute` 中
+    被打上标记，因此这里只关心「未打标记且引用了租户表」的语句。ORM 的
+    INSERT 不走那条路径（见 :func:`_is_orm_tenant_insert`），需要单独放行。
+
+    默认仅告警一次；设置 ``DSA_TENANCY_STRICT_RAW_SQL=true`` 后直接报错。
     """
 
     def _before_execute(conn, clauseelement, multiparams, params, execution_options):
         if not should_scope():
             return
         if execution_options.get(_TENANCY_MARKER):
+            return
+        if _is_orm_tenant_insert(clauseelement):
             return
 
         sql = str(clauseelement)
