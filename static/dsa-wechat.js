@@ -445,7 +445,7 @@
           <td style="padding: 10px 12px; color: #d1d5db;">${u.display_name || '-'}</td>
           <td style="padding: 10px 12px;">
             <span style="background: ${u.role === 'admin' ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.1)'}; color: ${u.role === 'admin' ? '#60a5fa' : '#d1d5db'}; padding: 2px 8px; border-radius: 6px; font-size: 11px;">
-              ${u.role === 'admin' ? '系统管理员' : '普通用户'}
+              ${u.username === 'cowagent' ? '🤖 MCP服务账号' : u.role === 'admin' ? '系统管理员' : '普通用户'}
             </span>
           </td>
           <td style="padding: 10px 12px;">
@@ -459,7 +459,7 @@
           </td>
           <td style="padding: 10px 12px; text-align: right;">
             <button onclick="window.dsaResetUserPwd(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(245,158,11,0.4); color: #f59e0b; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; margin-right: 6px;">重置密码</button>
-            ${!u.is_system && u.username !== 'admin'
+            ${!u.is_system ${!u.is_system && u.username !== 'admin'${!u.is_system && u.username !== 'admin' u.username !== 'admin' ${!u.is_system && u.username !== 'admin'${!u.is_system && u.username !== 'admin' u.username !== 'cowagent'
               ? `<button onclick="window.dsaDeleteUser(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(239,68,68,0.4); color: #ef4444; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;">删除</button>`
               : ''
             }
