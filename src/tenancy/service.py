@@ -571,31 +571,18 @@ def resolve_principal_from_token(token: str) -> Optional[Principal]:
 def list_schedulable_users() -> List[Dict[str, Any]]:
     """返回参与定时分析的活跃用户及其调度配置。
 
-    这是 per-user 调度的数据源：调度器为每个条目注册一个每日任务。
+    系统实行全局统一定时调度：所有活跃用户统一步调触发，避免重复拉取数据源。
+    个人调度时间不再独立生效，全部跟随全局 SCHEDULE_TIMES。
     """
-    from src.tenancy.settings import decode_value, get_spec, load_user_settings
-
     entries: List[Dict[str, Any]] = []
     for user in list_users(include_disabled=False):
-        raw = load_user_settings(user.id)
-        spec_enabled = get_spec("SCHEDULE_ENABLED")
-        spec_times = get_spec("SCHEDULE_TIMES")
-
-        enabled_raw = raw.get("SCHEDULE_ENABLED")
-        enabled = (
-            decode_value(spec_enabled, enabled_raw) if enabled_raw not in (None, "") else None
-        )
-        times_raw = raw.get("SCHEDULE_TIMES")
-        times = (
-            decode_value(spec_times, times_raw) if times_raw not in (None, "") else None
-        )
         entries.append(
             {
                 "tenant_id": user.id,
                 "username": user.username,
                 "role": user.role,
-                "schedule_enabled": enabled,
-                "schedule_times": times,
+                "schedule_enabled": True,
+                "schedule_times": None,
             }
         )
     return entries

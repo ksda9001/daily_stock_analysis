@@ -77,6 +77,27 @@ def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
     )
 
 
+def _resolve_tenant_id(req: Optional[Request] = None) -> Optional[int]:
+    """Resolve current tenant ID if multi-user mode is active."""
+    try:
+        from src.tenancy.context import current_principal, multiuser_enabled
+
+        if not multiuser_enabled():
+            return None
+        p = current_principal()
+        if p is not None:
+            return p.user_id
+        if req is not None:
+            from src.tenancy.middleware import resolve_request_principal
+
+            p = resolve_request_principal(req)
+            if p is not None:
+                return p.user_id
+    except Exception as exc:
+        logger.warning("[stocks] failed to resolve tenant_id: %s", exc)
+    return None
+
+
 # Stock code validation patterns (aligned with frontend validateStockCode)
 _STOCK_CODE_RE = re.compile(
     r"^(?:\d{6}"                              # A-share 6-digit
@@ -327,12 +348,20 @@ async def parse_import(request: Request) -> ExtractFromImageResponse:
         500: {"description": "服务器错误", "model": ErrorResponse},
     },
     summary="获取自选队列",
-    description="返回当前 STOCK_LIST 配置中的所有股票代码。",
+    description="返回当前用户的自选股票代码（多用户模式下按租户隔离，单用户模式下读取 STOCK_LIST 配置）。",
 )
 def get_watchlist(
+    req: Request,
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> WatchlistResponse:
     try:
+        tenant_id = _resolve_tenant_id(req)
+        if tenant_id is not None:
+            from src.tenancy.settings import resolve_stock_list
+
+            stock_data = resolve_stock_list(tenant_id)
+            codes = stock_data.get("stock_codes") or []
+            return WatchlistResponse(stock_codes=codes, message=f"当前自选 {len(codes)} 只股票")
         codes = _read_watchlist_codes(service)
         return WatchlistResponse(stock_codes=codes, message=f"当前自选 {len(codes)} 只股票")
     except Exception as e:
@@ -352,14 +381,22 @@ def get_watchlist(
         500: {"description": "服务器错误", "model": ErrorResponse},
     },
     summary="加入自选队列",
-    description="将指定股票代码加入 STOCK_LIST。",
+    description="将指定股票代码加入当前用户的自选队列。",
 )
 def add_to_watchlist(
     request: WatchlistRequest,
+    req: Request,
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> WatchlistResponse:
     try:
         validated = _validate_and_normalize_stock_code(request.stock_code)
+        tenant_id = _resolve_tenant_id(req)
+        if tenant_id is not None:
+            from src.tenancy.settings import add_user_stock
+
+            res = add_user_stock(tenant_id, validated)
+            codes = res.get("stock_codes") or []
+            return WatchlistResponse(stock_codes=codes, message=f"已加入 {request.stock_code.strip()}")
         codes = _read_watchlist_codes(service)
         existing_keys = [_watchlist_match_key(c) for c in codes]
         if _watchlist_match_key(validated) not in existing_keys:
@@ -385,14 +422,22 @@ def add_to_watchlist(
         500: {"description": "服务器错误", "model": ErrorResponse},
     },
     summary="从自选队列删除",
-    description="从 STOCK_LIST 中移除指定股票代码。",
+    description="从当前用户的自选队列中移除指定股票代码。",
 )
 def remove_from_watchlist(
     request: WatchlistRequest,
+    req: Request,
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> WatchlistResponse:
     try:
         validated = _validate_and_normalize_stock_code(request.stock_code)
+        tenant_id = _resolve_tenant_id(req)
+        if tenant_id is not None:
+            from src.tenancy.settings import remove_user_stock
+
+            res = remove_user_stock(tenant_id, validated)
+            codes = res.get("stock_codes") or []
+            return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")
         codes = _read_watchlist_codes(service)
         existing_keys = [_watchlist_match_key(c) for c in codes]
         requested_key = _watchlist_match_key(validated)

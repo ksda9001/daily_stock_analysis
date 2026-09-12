@@ -61,9 +61,6 @@ USER_SETTING_SPECS: tuple = (
     SettingSpec("STOCK_LIST", "stock_list", KIND_CODES, "自选股列表"),
     SettingSpec("REPORT_TYPE", "report_type", KIND_STR, "报告类型"),
     SettingSpec("AGENT_MODE", "agent_mode", KIND_BOOL, "Agent 模式"),
-    # ---- 调度 ----
-    SettingSpec("SCHEDULE_ENABLED", "schedule_enabled", KIND_BOOL, "启用定时分析"),
-    SettingSpec("SCHEDULE_TIMES", "schedule_times", KIND_TIMES, "定时执行时间"),
     # ---- 通知：企业微信 / 钉钉 / 飞书 ----
     SettingSpec("WECHAT_WEBHOOK_URL", "wechat_webhook_url", KIND_STR, "企业微信机器人", secret=True),
     SettingSpec("DINGTALK_WEBHOOK_URL", "dingtalk_webhook_url", KIND_STR, "钉钉机器人", secret=True),
@@ -98,6 +95,9 @@ _FORBIDDEN_KEYS = frozenset({
     "DATABASE_PATH",
     "ADMIN_AUTH_ENABLED",
     "DSA_MULTIUSER_ENABLED",
+    "SCHEDULE_ENABLED",
+    "SCHEDULE_TIMES",
+    "SCHEDULE_TIME",
     "LLM_CHANNELS",
     "LITELLM_CONFIG",
     "OPENAI_API_KEY",
@@ -373,12 +373,15 @@ def effective_stock_list(tenant_id: Optional[int]) -> Optional[List[str]]:
 
     if tenant_id is None or not multiuser_enabled():
         return None
-    raw = load_user_settings(tenant_id).get("STOCK_LIST")
-    if not raw:
+    settings = load_user_settings(tenant_id)
+    if "STOCK_LIST" not in settings:
         return None
+    raw = settings.get("STOCK_LIST")
+    if not raw:
+        return []
     spec = get_spec("STOCK_LIST")
     decoded = decode_value(spec, raw)
-    return decoded or None
+    return decoded if decoded is not None else []
 
 
 def public_settings_view(tenant_id: int) -> Dict[str, Any]:

@@ -48,6 +48,26 @@
       border-color: rgba(59, 130, 246, 0.6);
       transform: translateY(-1px);
     }
+    .dsa-notify-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      background: rgba(245, 158, 11, 0.12);
+      color: #f59e0b;
+      user-select: none;
+    }
+    .dsa-notify-btn:hover {
+      background: rgba(245, 158, 11, 0.25);
+      border-color: rgba(245, 158, 11, 0.6);
+      transform: translateY(-1px);
+    }
     .dsa-floating-dock {
       position: fixed;
       bottom: 24px;
@@ -488,6 +508,279 @@
   `;
   document.body.appendChild(usersModal);
 
+  // Personal Notification Settings Modal (All Users)
+  const notifyModal = document.createElement('div');
+  notifyModal.className = 'dsa-modal-backdrop';
+  notifyModal.id = 'dsa-notify-modal';
+  notifyModal.innerHTML = `
+    <div class="dsa-modal-box" style="max-width: 760px;">
+      <div class="dsa-modal-header">
+        <div class="dsa-modal-title">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="#f59e0b"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+          <span>个人通知渠道管理（独立推送）</span>
+        </div>
+        <button class="dsa-modal-close" onclick="window.dsaCloseNotifyModal()">&times;</button>
+      </div>
+      <div class="dsa-modal-body">
+        <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 14px; padding: 14px 18px; margin-bottom: 20px; font-size: 13px; color: #fbbf24; line-height: 1.6;">
+          <strong>💡 个人推送隔离保障：</strong> 在此配置您个人的专属推送通道。系统每日统一定时分析时，将<strong>仅推送您自己自选股的分析结果</strong>到您配置的通道，绝不推送到他人渠道，互不干扰、隐私安全。
+        </div>
+
+        <!-- Notification Channels Form -->
+        <div style="display: flex; flex-direction: column; gap: 18px;">
+          <!-- 1. 企业微信机器人 -->
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px 16px;">
+            <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+              <span>💬 企业微信群机器人</span>
+            </div>
+            <div>
+              <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Webhook URL</label>
+              <input type="text" id="dsa-notify-wechat" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+            </div>
+          </div>
+
+          <!-- 2. 飞书机器人 -->
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px 16px;">
+            <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+              <span>🕊️ 飞书群机器人</span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Webhook URL</label>
+                <input type="text" id="dsa-notify-feishu" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">签名密钥 (选填)</label>
+                <input type="text" id="dsa-notify-feishu-secret" placeholder="飞书安全设置中的签名密钥" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. 钉钉机器人 -->
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px 16px;">
+            <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+              <span>📌 钉钉群机器人</span>
+            </div>
+            <div>
+              <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Webhook URL</label>
+              <input type="text" id="dsa-notify-dingtalk" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+            </div>
+          </div>
+
+          <!-- 4. 邮件推送 -->
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px 16px;">
+            <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+              <span>📧 邮件推送</span>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">收件人邮箱 (多个用逗号隔开)</label>
+                <input type="text" id="dsa-notify-email-receivers" placeholder="your_email@domain.com" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">发件邮箱 (选填，留空沿用系统)</label>
+                <input type="text" id="dsa-notify-email-sender" placeholder="sender@domain.com" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">发件邮箱授权码 (选填)</label>
+                <input type="password" id="dsa-notify-email-pass" placeholder="SMTP 授权码" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+            </div>
+          </div>
+
+          <!-- 5. 移动推送 / 其他 -->
+          <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px 16px;">
+            <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+              <span>📱 移动应用推送 (PushPlus / Server酱 / Telegram)</span>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">PushPlus Token</label>
+                <input type="text" id="dsa-notify-pushplus" placeholder="PushPlus 用户 Token" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Server酱3 SendKey</label>
+                <input type="text" id="dsa-notify-serverchan" placeholder="Server酱 SendKey" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Telegram Bot Token</label>
+                <input type="text" id="dsa-notify-tg-token" placeholder="Bot Token" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+              <div>
+                <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">Telegram Chat ID</label>
+                <input type="text" id="dsa-notify-tg-chat" placeholder="Chat ID" style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 24px; display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; gap: 8px;">
+            <select id="dsa-notify-test-channel" style="background: #1f2937; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #fff;">
+              <option value="wechat">测试企业微信</option>
+              <option value="feishu">测试飞书</option>
+              <option value="dingtalk">测试钉钉</option>
+              <option value="email">测试邮件</option>
+              <option value="pushplus">测试PushPlus</option>
+              <option value="serverchan3">测试Server酱</option>
+              <option value="telegram">测试Telegram</option>
+            </select>
+            <button onclick="window.dsaTestNotifyChannel()" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #e5e7eb; border-radius: 8px; padding: 8px 14px; font-size: 12px; cursor: pointer;">🧪 发送测试通知</button>
+          </div>
+          <button onclick="window.dsaSaveNotifySettings()" style="background: #059669; color: #fff; border: none; border-radius: 8px; padding: 10px 24px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;">💾 保存个人通知设置</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(notifyModal);
+
+  let cachedNotifySettings = {};
+
+  window.dsaOpenNotifyModal = async function() {
+    notifyModal.classList.add('active');
+    await window.dsaLoadNotifySettings();
+  };
+
+  window.dsaCloseNotifyModal = function() {
+    notifyModal.classList.remove('active');
+  };
+
+  window.dsaLoadNotifySettings = async function() {
+    try {
+      const res = await fetch('/api/v1/tenancy/settings');
+      if (!res.ok) throw new Error('加载设置失败: ' + res.status);
+      const data = await res.json();
+      cachedNotifySettings = data.settings || {};
+
+      const setVal = (id, key) => {
+        const input = document.getElementById(id);
+        if (!input) return;
+        const item = cachedNotifySettings[key];
+        if (item && item.configured) {
+          input.value = item.value || '';
+          input.dataset.original = item.value || '';
+        } else {
+          input.value = '';
+          input.dataset.original = '';
+        }
+      };
+
+      setVal('dsa-notify-wechat', 'WECHAT_WEBHOOK_URL');
+      setVal('dsa-notify-feishu', 'FEISHU_WEBHOOK_URL');
+      setVal('dsa-notify-feishu-secret', 'FEISHU_WEBHOOK_SECRET');
+      setVal('dsa-notify-dingtalk', 'DINGTALK_WEBHOOK_URL');
+      setVal('dsa-notify-email-receivers', 'EMAIL_RECEIVERS');
+      setVal('dsa-notify-email-sender', 'EMAIL_SENDER');
+      setVal('dsa-notify-email-pass', 'EMAIL_PASSWORD');
+      setVal('dsa-notify-pushplus', 'PUSHPLUS_TOKEN');
+      setVal('dsa-notify-serverchan', 'SERVERCHAN3_SENDKEY');
+      setVal('dsa-notify-tg-token', 'TELEGRAM_BOT_TOKEN');
+      setVal('dsa-notify-tg-chat', 'TELEGRAM_CHAT_ID');
+    } catch (e) {
+      alert('无法读取个人通知设置: ' + e);
+    }
+  };
+
+  window.dsaSaveNotifySettings = async function() {
+    const updates = {};
+    const checkAndAdd = (id, key) => {
+      const input = document.getElementById(id);
+      if (!input) return;
+      const val = input.value.trim();
+      const orig = input.dataset.original || '';
+      if (val && val !== orig) {
+        updates[key] = val;
+      } else if (!val && orig) {
+        updates[key] = '';
+      }
+    };
+
+    checkAndAdd('dsa-notify-wechat', 'WECHAT_WEBHOOK_URL');
+    checkAndAdd('dsa-notify-feishu', 'FEISHU_WEBHOOK_URL');
+    checkAndAdd('dsa-notify-feishu-secret', 'FEISHU_WEBHOOK_SECRET');
+    checkAndAdd('dsa-notify-dingtalk', 'DINGTALK_WEBHOOK_URL');
+    checkAndAdd('dsa-notify-email-receivers', 'EMAIL_RECEIVERS');
+    checkAndAdd('dsa-notify-email-sender', 'EMAIL_SENDER');
+    checkAndAdd('dsa-notify-email-pass', 'EMAIL_PASSWORD');
+    checkAndAdd('dsa-notify-pushplus', 'PUSHPLUS_TOKEN');
+    checkAndAdd('dsa-notify-serverchan', 'SERVERCHAN3_SENDKEY');
+    checkAndAdd('dsa-notify-tg-token', 'TELEGRAM_BOT_TOKEN');
+    checkAndAdd('dsa-notify-tg-chat', 'TELEGRAM_CHAT_ID');
+
+    if (Object.keys(updates).length === 0) {
+      alert('未检测到变更内容');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/v1/tenancy/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: updates })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert('🎉 个人通知设置已成功保存！');
+        window.dsaLoadNotifySettings();
+      } else {
+        alert('保存失败: ' + (data.message || JSON.stringify(data)));
+      }
+    } catch (e) {
+      alert('请求错误: ' + e);
+    }
+  };
+
+  window.dsaTestNotifyChannel = async function() {
+    const channel = document.getElementById('dsa-notify-test-channel').value;
+    const channelItems = [];
+
+    const addField = (id, key) => {
+      const input = document.getElementById(id);
+      if (input && input.value.trim()) {
+        channelItems.push({ key: key, value: input.value.trim() });
+      }
+    };
+
+    if (channel === 'wechat') addField('dsa-notify-wechat', 'WECHAT_WEBHOOK_URL');
+    if (channel === 'feishu') {
+      addField('dsa-notify-feishu', 'FEISHU_WEBHOOK_URL');
+      addField('dsa-notify-feishu-secret', 'FEISHU_WEBHOOK_SECRET');
+    }
+    if (channel === 'dingtalk') addField('dsa-notify-dingtalk', 'DINGTALK_WEBHOOK_URL');
+    if (channel === 'email') {
+      addField('dsa-notify-email-receivers', 'EMAIL_RECEIVERS');
+      addField('dsa-notify-email-sender', 'EMAIL_SENDER');
+      addField('dsa-notify-email-pass', 'EMAIL_PASSWORD');
+    }
+    if (channel === 'pushplus') addField('dsa-notify-pushplus', 'PUSHPLUS_TOKEN');
+    if (channel === 'serverchan3') addField('dsa-notify-serverchan', 'SERVERCHAN3_SENDKEY');
+    if (channel === 'telegram') {
+      addField('dsa-notify-tg-token', 'TELEGRAM_BOT_TOKEN');
+      addField('dsa-notify-tg-chat', 'TELEGRAM_CHAT_ID');
+    }
+
+    try {
+      const res = await fetch('/api/v1/system/config/notification/test-channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: channel,
+          items: channelItems,
+          title: 'DSA 个人通知测试',
+          content: '您好！这是一条来自 DSA 个人专属通知测试消息。配置成功！'
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('✅ 测试消息发送成功！请检查您的接收渠道。');
+      } else {
+        alert('❌ 测试发送失败: ' + (data.message || data.error_code || '未知错误'));
+      }
+    } catch (e) {
+      alert('请求测试失败: ' + e);
+    }
+  };
+
   // Global functions
   window.dsaOpenWechatModal = async function() {
     wechatModal.classList.add('active');
@@ -793,6 +1086,17 @@
       wxBtn.onclick = window.dsaOpenWechatModal;
       btnGroup.appendChild(wxBtn);
 
+      // Personal Notification Button (Available to all logged-in users)
+      const notifyBtn = document.createElement('button');
+      notifyBtn.id = 'dsa-notify-btn';
+      notifyBtn.className = 'dsa-notify-btn';
+      notifyBtn.innerHTML = `
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+        <span>个人通知</span>
+      `;
+      notifyBtn.onclick = window.dsaOpenNotifyModal;
+      btnGroup.appendChild(notifyBtn);
+
       // Admin User Management Button (Admin Only)
       if (user.role === 'admin') {
         const usersBtn = document.createElement('button');
@@ -847,6 +1151,16 @@
       sideWx.onclick = window.dsaOpenWechatModal;
       sidebarGroup.appendChild(sideWx);
 
+      // Personal Notification Settings for All Users
+      const sideNotify = document.createElement('div');
+      sideNotify.className = 'dsa-sidebar-item';
+      sideNotify.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="#f59e0b"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+        <span style="font-weight: 500;">个人通知设置</span>
+      `;
+      sideNotify.onclick = window.dsaOpenNotifyModal;
+      sidebarGroup.appendChild(sideNotify);
+
       const settingsLink = nav.querySelector('a[href="/settings"]');
       if (settingsLink) {
         nav.insertBefore(sidebarGroup, settingsLink);
@@ -878,6 +1192,10 @@
         `;
       }
       html += `
+        <button onclick="window.dsaOpenNotifyModal()" class="dsa-notify-btn" title="个人专属通知设置">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+          <span>通知设置</span>
+        </button>
         <button onclick="window.dsaOpenWechatModal()" class="dsa-wx-btn" title="微信助手绑定">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 2C4.36 2 1 4.91 1 8.5c0 2.02 1.07 3.84 2.76 5.07l-.7 2.12c-.08.24.16.46.38.35l2.67-1.34c.75.22 1.55.35 2.39.35.25 0 .5-.01.74-.04-.2-.64-.31-1.32-.31-2.01 0-3.87 3.58-7 8-7 .2 0 .4 0 .6.02C16.32 4.41 12.69 2 8.5 2zM19 8c-3.87 0-7 2.69-7 6s3.13 6 7 6c.69 0 1.36-.09 1.98-.26l2.25 1.13c.22.11.46-.11.38-.35l-.59-1.78C23.95 17.65 25 15.93 25 14c0-3.31-3.13-6-7-6z"/></svg>
           <span>${user.wechat_bound ? '微信已绑定' : '绑定微信'}</span>
