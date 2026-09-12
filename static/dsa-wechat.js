@@ -8,6 +8,11 @@
   // Inject Styles
   const style = document.createElement('style');
   style.textContent = `
+    /* ⚠️ 颜色一律写成 hsl(var(--xxx))：项目里的 --secondary-text / --primary /
+       --foreground 存的是「裸 HSL 三元组」（如 224 18% 28%），
+       直接当颜色用是非法值 —— 声明会在计算期失效，且因为变量已定义，
+       var() 的 fallback 不会兜底，color 会退化成继承父级。
+       这正是注入条目文字比原生条目更亮的原因。 */
     .dsa-sidebar-item {
       display: flex;
       align-items: center;
@@ -19,26 +24,37 @@
       border: 1px solid transparent;
       font-size: 14px;
       line-height: 1;
-      color: var(--secondary-text, #9ca3af);
+      color: hsl(var(--secondary-text, 224 18% 28%));
       cursor: pointer;
       transition: all 0.15s ease;
       text-decoration: none;
       user-select: none;
       box-sizing: border-box;
     }
+    /* ⚠️ 原生条目 hover 时「文字颜色不变」，只有背景高亮 —— 不是我们偷懒，
+       而是原生的 hover:text-foreground 本来就失效：它位于 @layer utilities，
+       而项目自己的 .text-secondary-text{color:var(--text-secondary-text)} 是无层级规则，
+       无层级胜过有层级（与具体性无关）。注入层是无层级 <style>，
+       在这里写任何 color 都会真的生效，所以刻意与 idle 保持同色才能对齐。
+       另：background 的 fallback 从白色蒙版改为跟随 --primary 的配方，
+       白色 fallback 是纯暗色主题假设，浅色主题下等于没有高亮。 */
     .dsa-sidebar-item:hover {
-      background: var(--nav-hover-bg, rgba(255, 255, 255, 0.06));
-      color: #fff;
+      background: var(--nav-hover-bg, hsl(var(--primary, 193 100% 43%) / 0.05));
+      color: hsl(var(--secondary-text, 224 18% 28%));
     }
+    /* 实测原生 active 项（Home）渲染出来是 foreground 而不是 primary：
+       它的 .text-[hsl(var(--primary))] 同样被无层级的 a{color:inherit} 压过。
+       要和原生一致就得用 foreground。 */
     .dsa-sidebar-item.active {
-      background: var(--nav-active-bg, rgba(255, 255, 255, 0.08));
-      border-color: var(--nav-active-border, rgba(255, 255, 255, 0.15));
-      color: hsl(var(--primary));
+      background: var(--nav-active-bg, hsl(var(--primary, 193 100% 43%) / 0.09));
+      border-color: var(--nav-active-border, hsl(var(--primary, 193 100% 43%) / 0.24));
+      color: hsl(var(--foreground));
       font-weight: 500;
     }
     aside .dsa-sidebar-item {
       justify-content: center;
-      gap: 8px;
+      /* 原生 rail 用 gap-2.5 = 10px，原来写成 8px 会差 2px */
+      gap: 10px;
       padding: 0 8px;
     }
     [role="dialog"] .dsa-sidebar-item,
