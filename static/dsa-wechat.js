@@ -245,138 +245,11 @@
   // 1. Multi-User Login Enhancement on /login
   // =========================================================================
   function enhanceLoginPage() {
-    if (!window.location.pathname.startsWith('/login')) return;
-
-    const pwdInput = document.getElementById('password');
-    if (!pwdInput) return;
-
-    const form = pwdInput.closest('form');
-    if (!form || form.dataset.dsaEnhanced) return;
-    form.dataset.dsaEnhanced = 'true';
-
-    // 1. Update card titles
-    const cardEl = form.parentElement;
-    if (cardEl) {
-      const titleEl = cardEl.querySelector('h1 span') || cardEl.querySelector('h1');
-      if (titleEl) {
-        titleEl.textContent = '量化投研平台统一登录';
-      }
-      const descEl = cardEl.querySelector('p');
-      if (descEl) {
-        descEl.textContent = '请输入您的团队成员账号与密码进行登录';
-      }
-    }
-
-    // 2. Inject Username field container right above password field
-    const pwdWrapper = pwdInput.closest('.space-y-4') || pwdInput.parentElement;
-    const userField = document.createElement('div');
-    userField.id = 'dsa-username-wrapper';
-    userField.style.display = 'flex';
-    userField.style.flexDirection = 'column';
-    userField.style.gap = '6px';
-    userField.style.marginBottom = '12px';
-    userField.innerHTML = `
-      <label for="dsa-login-username" style="display: block; font-size: 13px; font-weight: 600; color: #e5e7eb;">
-        账号 / 用户名
-      </label>
-      <div style="position: relative; display: flex; align-items: center;">
-        <span style="position: absolute; left: 14px; color: #9ca3af; pointer-events: none; display: flex; align-items: center;">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        </span>
-        <input
-          id="dsa-login-username"
-          type="text"
-          placeholder="请输入用户名 (如: admin 或 团队账号)"
-          autocomplete="username"
-          style="width: 100%; box-sizing: border-box; height: 46px; padding: 0 14px 0 44px; border-radius: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.18); color: #fff; font-size: 14px; outline: none; transition: border-color 0.2s;"
-        />
-      </div>
-    `;
-
-    if (pwdWrapper && pwdWrapper.parentElement === form) {
-      pwdWrapper.insertBefore(userField, pwdWrapper.firstChild);
-    } else {
-      pwdInput.parentElement.insertBefore(userField, pwdInput);
-    }
-
-    // Auto-focus username
-    const usernameInput = document.getElementById('dsa-login-username');
-    if (usernameInput) usernameInput.focus();
-
-    // Error container
-    let errorBox = document.getElementById('dsa-login-error');
-    if (!errorBox) {
-      errorBox = document.createElement('div');
-      errorBox.id = 'dsa-login-error';
-      errorBox.style.display = 'none';
-      errorBox.style.padding = '10px 14px';
-      errorBox.style.borderRadius = '10px';
-      errorBox.style.fontSize = '13px';
-      errorBox.style.marginTop = '10px';
-      errorBox.style.background = 'rgba(239, 68, 68, 0.15)';
-      errorBox.style.border = '1px solid rgba(239, 68, 68, 0.35)';
-      errorBox.style.color = '#ef4444';
-      form.insertBefore(errorBox, form.querySelector('button[type="submit"]'));
-    }
-
-    // 3. Intercept Form Submission (Capture Phase)
-    form.addEventListener('submit', async function(e) {
-      e.preventDefault();
-      e.stopPropagation();
-
-      const u = usernameInput ? usernameInput.value.trim() : '';
-      const p = pwdInput ? pwdInput.value.trim() : '';
-
-      if (!u) {
-        errorBox.textContent = '请输入用户名';
-        errorBox.style.display = 'block';
-        if (usernameInput) usernameInput.focus();
-        return;
-      }
-      if (!p) {
-        errorBox.textContent = '请输入密码';
-        errorBox.style.display = 'block';
-        if (pwdInput) pwdInput.focus();
-        return;
-      }
-
-      const submitBtn = form.querySelector('button[type="submit"]');
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.style.opacity = '0.6';
-      }
-      errorBox.style.display = 'none';
-
-      try {
-        const res = await fetch('/api/v1/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: u, password: p })
-        });
-        const data = await res.json();
-        if (res.ok && data.ok) {
-          // Success! Redirect
-          const urlParams = new URLSearchParams(window.location.search);
-          const redirect = urlParams.get('redirect') || '/';
-          window.location.assign(redirect);
-        } else {
-          errorBox.textContent = data.message || data.error || '登录失败，请检查用户名与密码';
-          errorBox.style.display = 'block';
-          if (submitBtn) {
-            submitBtn.disabled = false;
-            submitBtn.style.opacity = '1';
-          }
-        }
-      } catch (err) {
-        errorBox.textContent = '网络连接异常: ' + err.message;
-        errorBox.style.display = 'block';
-        if (submitBtn) {
-          submitBtn.disabled = false;
-          submitBtn.style.opacity = '1';
-        }
-      }
-    }, true);
+    // Native React bundle (LoginPage-_15D7jin.js & index-Dhkgyx-b.js) now natively handles
+    // the username field and multi-user login state, avoiding DOM desync with React.
+    return;
   }
+
 
   // =========================================================================
   // 2. Modals (WeChat Binding & Admin User Management)
@@ -484,7 +357,12 @@
         <!-- Users Table -->
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
           <span style="font-size: 14px; font-weight: 600; color: #fff;">团队成员账号列表</span>
-          <button onclick="window.dsaLoadUsersTable()" style="background: transparent; border: 1px solid rgba(255,255,255,0.15); color: #9ca3af; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;">刷新列表</button>
+          <div style="display: flex; gap: 8px;">
+            <a href="https://cow.myfi.cc.cd/chat" target="_blank" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.35); color: #10b981; border-radius: 6px; padding: 4px 10px; font-size: 12px; text-decoration: none; font-weight: 500;">
+              <span>💬 打开 Cow 消息审计台</span>
+            </a>
+            <button onclick="window.dsaLoadUsersTable()" style="background: transparent; border: 1px solid rgba(255,255,255,0.15); color: #9ca3af; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;">刷新列表</button>
+          </div>
         </div>
         <div style="overflow-x: auto; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px;">
           <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
@@ -889,7 +767,8 @@
               : `<span style="color: #6b7280; font-size: 12px;">○ 未绑定微信</span>`
             }
           </td>
-          <td style="padding: 10px 12px; text-align: right;">
+          <td style="padding: 10px 12px; text-align: right; white-space: nowrap;">
+            ${u.wechat_bound ? `<a href="https://cow.myfi.cc.cd/chat" target="_blank" style="display: inline-block; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #10b981; border-radius: 6px; padding: 2px 8px; font-size: 11px; text-decoration: none; margin-right: 6px;">💬 微信审计</a>` : ''}
             ${u.username !== 'cowagent' ? `<button onclick="window.dsaResetUserPwd(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(245,158,11,0.4); color: #f59e0b; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; margin-right: 6px;">重置密码</button>` : ''}
             ${!u.is_system && u.username !== 'admin' && u.username !== 'cowagent'
               ? `<button onclick="window.dsaDeleteUser(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(239,68,68,0.4); color: #ef4444; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;">删除</button>`

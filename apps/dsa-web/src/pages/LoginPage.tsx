@@ -25,6 +25,7 @@ const LoginPage: React.FC = () => {
   const redirect =
     rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '/';
 
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -60,7 +61,7 @@ const LoginPage: React.FC = () => {
     }
     setIsSubmitting(true);
     try {
-      const result = await login(password, isFirstTime ? passwordConfirm : undefined);
+      const result = await login(password, isFirstTime ? passwordConfirm : undefined, username);
       if (result.success) {
         navigate(redirect, { replace: true });
       } else {
@@ -166,19 +167,35 @@ const LoginPage: React.FC = () => {
                 ) : (
                   <>
                     <Lock className="h-5 w-5 text-[var(--login-accent-text)]" />
-                    <span>{t('login.adminLogin')}</span>
+                    <span>用户登录</span>
                   </>
                 )}
               </h1>
               <p className="mt-2 text-sm text-[var(--login-text-secondary)]">
                 {isFirstTime
                   ? t('login.setupDescription')
-                  : t('login.loginDescription')}
+                  : '请输入您的系统账号与密码以进入量化决策工作台。'}
               </p>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">
               <div className="space-y-4">
+                {!isFirstTime && (
+                  <Input
+                    id="username"
+                    type="text"
+                    appearance="login"
+                    iconType="key"
+                    label="用户名 / 账号"
+                    placeholder="管理员请输入 admin，成员请输入账号"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    disabled={isSubmitting}
+                    autoFocus
+                    autoComplete="username"
+                  />
+                )}
+
                 <Input
                   id="password"
                   type="password"
@@ -190,7 +207,7 @@ const LoginPage: React.FC = () => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   disabled={isSubmitting}
-                  autoFocus
+                  autoFocus={isFirstTime}
                   autoComplete={isFirstTime ? 'new-password' : 'current-password'}
                 />
 

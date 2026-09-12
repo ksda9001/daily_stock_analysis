@@ -439,6 +439,7 @@ async def auth_login(request: Request, body: LoginRequest):
         mark_login(user.id)
         token = issue_api_token(user.id, actor=None, client_ip=ip)
         resp = JSONResponse(content={"ok": True, "user": user.to_public_dict()})
+        resp.delete_cookie(key=COOKIE_NAME, path="/")
         resp.set_cookie(
             key="dsa_user_token",
             value=token,
