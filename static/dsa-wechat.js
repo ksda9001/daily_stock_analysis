@@ -1,6 +1,6 @@
 /**
  * DSA Unified Identity & WeChat ClawBot Integration
- * Enterprise UI Extension: User Management & WeChat Assistant
+ * Enterprise UI Extension: Multi-User Login & User Management & WeChat Assistant
  */
 (function() {
   'use strict';
@@ -221,7 +221,146 @@
     return null;
   }
 
-  // Create Modals
+  // =========================================================================
+  // 1. Multi-User Login Enhancement on /login
+  // =========================================================================
+  function enhanceLoginPage() {
+    if (!window.location.pathname.startsWith('/login')) return;
+
+    const pwdInput = document.getElementById('password');
+    if (!pwdInput) return;
+
+    const form = pwdInput.closest('form');
+    if (!form || form.dataset.dsaEnhanced) return;
+    form.dataset.dsaEnhanced = 'true';
+
+    // 1. Update card titles
+    const cardEl = form.parentElement;
+    if (cardEl) {
+      const titleEl = cardEl.querySelector('h1 span') || cardEl.querySelector('h1');
+      if (titleEl) {
+        titleEl.textContent = '量化投研平台统一登录';
+      }
+      const descEl = cardEl.querySelector('p');
+      if (descEl) {
+        descEl.textContent = '请输入您的团队成员账号与密码进行登录';
+      }
+    }
+
+    // 2. Inject Username field container right above password field
+    const pwdWrapper = pwdInput.closest('.space-y-4') || pwdInput.parentElement;
+    const userField = document.createElement('div');
+    userField.id = 'dsa-username-wrapper';
+    userField.style.display = 'flex';
+    userField.style.flexDirection = 'column';
+    userField.style.gap = '6px';
+    userField.style.marginBottom = '12px';
+    userField.innerHTML = `
+      <label for="dsa-login-username" style="display: block; font-size: 13px; font-weight: 600; color: #e5e7eb;">
+        账号 / 用户名
+      </label>
+      <div style="position: relative; display: flex; align-items: center;">
+        <span style="position: absolute; left: 14px; color: #9ca3af; pointer-events: none; display: flex; align-items: center;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </span>
+        <input
+          id="dsa-login-username"
+          type="text"
+          placeholder="请输入用户名 (如: admin 或 团队账号)"
+          autocomplete="username"
+          style="width: 100%; box-sizing: border-box; height: 46px; padding: 0 14px 0 44px; border-radius: 12px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.18); color: #fff; font-size: 14px; outline: none; transition: border-color 0.2s;"
+        />
+      </div>
+    `;
+
+    if (pwdWrapper && pwdWrapper.parentElement === form) {
+      pwdWrapper.insertBefore(userField, pwdWrapper.firstChild);
+    } else {
+      pwdInput.parentElement.insertBefore(userField, pwdInput);
+    }
+
+    // Auto-focus username
+    const usernameInput = document.getElementById('dsa-login-username');
+    if (usernameInput) usernameInput.focus();
+
+    // Error container
+    let errorBox = document.getElementById('dsa-login-error');
+    if (!errorBox) {
+      errorBox = document.createElement('div');
+      errorBox.id = 'dsa-login-error';
+      errorBox.style.display = 'none';
+      errorBox.style.padding = '10px 14px';
+      errorBox.style.borderRadius = '10px';
+      errorBox.style.fontSize = '13px';
+      errorBox.style.marginTop = '10px';
+      errorBox.style.background = 'rgba(239, 68, 68, 0.15)';
+      errorBox.style.border = '1px solid rgba(239, 68, 68, 0.35)';
+      errorBox.style.color = '#ef4444';
+      form.insertBefore(errorBox, form.querySelector('button[type="submit"]'));
+    }
+
+    // 3. Intercept Form Submission (Capture Phase)
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const u = usernameInput ? usernameInput.value.trim() : '';
+      const p = pwdInput ? pwdInput.value.trim() : '';
+
+      if (!u) {
+        errorBox.textContent = '请输入用户名';
+        errorBox.style.display = 'block';
+        if (usernameInput) usernameInput.focus();
+        return;
+      }
+      if (!p) {
+        errorBox.textContent = '请输入密码';
+        errorBox.style.display = 'block';
+        if (pwdInput) pwdInput.focus();
+        return;
+      }
+
+      const submitBtn = form.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.style.opacity = '0.6';
+      }
+      errorBox.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: u, password: p })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          // Success! Redirect
+          const urlParams = new URLSearchParams(window.location.search);
+          const redirect = urlParams.get('redirect') || '/';
+          window.location.assign(redirect);
+        } else {
+          errorBox.textContent = data.message || data.error || '登录失败，请检查用户名与密码';
+          errorBox.style.display = 'block';
+          if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.style.opacity = '1';
+          }
+        }
+      } catch (err) {
+        errorBox.textContent = '网络连接异常: ' + err.message;
+        errorBox.style.display = 'block';
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.style.opacity = '1';
+        }
+      }
+    }, true);
+  }
+
+  // =========================================================================
+  // 2. Modals (WeChat Binding & Admin User Management)
+  // =========================================================================
   const wechatModal = document.createElement('div');
   wechatModal.className = 'dsa-modal-backdrop';
   wechatModal.id = 'dsa-wechat-modal';
@@ -276,7 +415,7 @@
   `;
   document.body.appendChild(wechatModal);
 
-  // User Management Modal (Admin)
+  // User Management Modal (Admin Only)
   const usersModal = document.createElement('div');
   usersModal.className = 'dsa-modal-backdrop';
   usersModal.id = 'dsa-users-modal';
@@ -312,7 +451,7 @@
             <div>
               <label style="display: block; font-size: 11px; color: #9ca3af; margin-bottom: 4px;">系统角色</label>
               <select id="dsa-new-role" style="width: 100%; box-sizing: border-box; background: #1f2937; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: #fff;">
-                <option value="user">普通用户 (量化投研)</option>
+                <option value="user">普通成员 (量化投研)</option>
                 <option value="admin">系统管理员 (全权管理)</option>
               </select>
             </div>
@@ -414,7 +553,7 @@
       });
       const data = await res.json();
       if (res.ok) {
-        alert(`🎉 账号 [${u}] 开通成功！\n\n初始密码：${p}\n\n请将该账号和密码提供给团队成员。\n成员在微信向机器人发送指令：\n登录 ${u} ${p}\n即可立刻绑定并使用量化投研服务！`);
+        alert(`🎉 账号 [${u}] 开通成功！\n\n初始密码：${p}\n\n请将该账号和密码提供给团队成员。\n成员在 Web 端直接输入账号密码即可登录；\n在微信向机器人发送指令：\n登录 ${u} ${p}\n即可立刻绑定并使用量化投研服务！`);
         document.getElementById('dsa-new-username').value = '';
         document.getElementById('dsa-new-password').value = '';
         document.getElementById('dsa-new-nickname').value = '';
@@ -444,8 +583,8 @@
           <td style="padding: 10px 12px; font-weight: 600;">${u.username}</td>
           <td style="padding: 10px 12px; color: #d1d5db;">${u.display_name || '-'}</td>
           <td style="padding: 10px 12px;">
-            <span style="background: ${u.role === 'admin' ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.1)'}; color: ${u.role === 'admin' ? '#60a5fa' : '#d1d5db'}; padding: 2px 8px; border-radius: 6px; font-size: 11px;">
-              ${u.username === 'cowagent' ? '🤖 MCP服务账号' : u.role === 'admin' ? '系统管理员' : '普通用户'}
+            <span style="background: ${u.username === 'cowagent' ? 'rgba(16,185,129,0.15)' : u.role === 'admin' ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.1)'}; color: ${u.username === 'cowagent' ? '#10b981' : u.role === 'admin' ? '#60a5fa' : '#d1d5db'}; padding: 2px 8px; border-radius: 6px; font-size: 11px;">
+              ${u.username === 'cowagent' ? '🤖 MCP服务账号' : u.role === 'admin' ? '系统管理员' : '普通成员'}
             </span>
           </td>
           <td style="padding: 10px 12px;">
@@ -458,10 +597,10 @@
             }
           </td>
           <td style="padding: 10px 12px; text-align: right;">
-            <button onclick="window.dsaResetUserPwd(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(245,158,11,0.4); color: #f59e0b; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; margin-right: 6px;">重置密码</button>
-            ${!u.is_system ${!u.is_system && u.username !== 'admin'${!u.is_system && u.username !== 'admin' u.username !== 'admin' ${!u.is_system && u.username !== 'admin'${!u.is_system && u.username !== 'admin' u.username !== 'cowagent'
+            ${u.username !== 'cowagent' ? `<button onclick="window.dsaResetUserPwd(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(245,158,11,0.4); color: #f59e0b; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; margin-right: 6px;">重置密码</button>` : ''}
+            ${!u.is_system && u.username !== 'admin' && u.username !== 'cowagent'
               ? `<button onclick="window.dsaDeleteUser(${u.id}, '${u.username}')" style="background: transparent; border: 1px solid rgba(239,68,68,0.4); color: #ef4444; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;">删除</button>`
-              : ''
+              : '<span style="color: #6b7280; font-size: 11px; padding: 0 4px;">系统内置</span>'
             }
           </td>
         </tr>
@@ -604,12 +743,36 @@
     }
   });
 
-  // Inject UI Components
+  // =========================================================================
+  // 3. Role-Based Navigation & Security Enforcement
+  // =========================================================================
   async function refreshUI() {
+    // Check if on login page
+    if (window.location.pathname.startsWith('/login')) {
+      enhanceLoginPage();
+      return;
+    }
+
     const user = await checkUser();
     if (!user) return;
 
-    // 1. Inject Header Buttons
+    // --- ENFORCE ROLE PERMISSIONS FOR NORMAL USERS ---
+    if (user.role !== 'admin') {
+      // 1. Hide "系统设置" (Settings) from sidebar completely
+      const settingsLinks = document.querySelectorAll('a[href="/settings"], a[href="#/settings"]');
+      settingsLinks.forEach(el => {
+        el.style.display = 'none';
+      });
+
+      // 2. If user navigated to /settings directly via address bar, immediately kick out
+      if (window.location.pathname.startsWith('/settings')) {
+        alert('⚠️ 权限限制：您当前为普通成员账号，无权访问底层系统设置。已为您返回首页。');
+        window.location.replace('/');
+        return;
+      }
+    }
+
+    // --- 1. Inject Header Buttons ---
     const header = document.querySelector('header .max-w-\\[1680px\\]') || document.querySelector('header > div') || document.querySelector('header');
     if (header && !document.getElementById('dsa-header-group')) {
       const btnGroup = document.createElement('div');
@@ -619,7 +782,7 @@
       btnGroup.style.gap = '8px';
       btnGroup.style.marginRight = '8px';
 
-      // WeChat Button
+      // WeChat Button (Available to all logged-in users)
       const wxBtn = document.createElement('button');
       wxBtn.id = 'dsa-wechat-btn';
       wxBtn.className = 'dsa-wx-btn';
@@ -630,7 +793,7 @@
       wxBtn.onclick = window.dsaOpenWechatModal;
       btnGroup.appendChild(wxBtn);
 
-      // Admin User Management Button
+      // Admin User Management Button (Admin Only)
       if (user.role === 'admin') {
         const usersBtn = document.createElement('button');
         usersBtn.id = 'dsa-users-btn';
@@ -651,7 +814,7 @@
       }
     }
 
-    // 2. Inject Left Sidebar Navigation Items
+    // --- 2. Inject Left Sidebar Navigation Items ---
     const nav = document.querySelector('nav[aria-label="主要导航"]') || document.querySelector('nav');
     if (nav && !document.getElementById('dsa-sidebar-group')) {
       const sidebarGroup = document.createElement('div');
@@ -661,8 +824,10 @@
       sidebarGroup.style.gap = '6px';
       sidebarGroup.style.margin = '4px 0';
 
+      // Admin Only Sidebar User Management
       if (user.role === 'admin') {
         const sideUser = document.createElement('div');
+        sideUser.id = 'dsa-sidebar-users-btn';
         sideUser.className = 'dsa-sidebar-item';
         sideUser.innerHTML = `
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -672,6 +837,7 @@
         sidebarGroup.appendChild(sideUser);
       }
 
+      // WeChat Assistant for All Users
       const sideWx = document.createElement('div');
       sideWx.className = 'dsa-sidebar-item';
       sideWx.innerHTML = `
@@ -681,7 +847,6 @@
       sideWx.onclick = window.dsaOpenWechatModal;
       sidebarGroup.appendChild(sideWx);
 
-      // Insert before Settings or at bottom of nav
       const settingsLink = nav.querySelector('a[href="/settings"]');
       if (settingsLink) {
         nav.insertBefore(sidebarGroup, settingsLink);
@@ -690,7 +855,7 @@
       }
     }
 
-    // 3. Inject Floating Quick Action Dock
+    // --- 3. Inject Floating Quick Action Dock ---
     if (!document.getElementById('dsa-floating-dock')) {
       const dock = document.createElement('div');
       dock.id = 'dsa-floating-dock';
@@ -704,11 +869,18 @@
             <span>用户管理</span>
           </button>
         `;
+      } else {
+        html += `
+          <span style="font-size: 12px; color: #9ca3af; padding: 0 4px; display: inline-flex; align-items: center; gap: 4px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            ${user.display_name || user.username}
+          </span>
+        `;
       }
       html += `
         <button onclick="window.dsaOpenWechatModal()" class="dsa-wx-btn" title="微信助手绑定">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8.5 2C4.36 2 1 4.91 1 8.5c0 2.02 1.07 3.84 2.76 5.07l-.7 2.12c-.08.24.16.46.38.35l2.67-1.34c.75.22 1.55.35 2.39.35.25 0 .5-.01.74-.04-.2-.64-.31-1.32-.31-2.01 0-3.87 3.58-7 8-7 .2 0 .4 0 .6.02C16.32 4.41 12.69 2 8.5 2zM19 8c-3.87 0-7 2.69-7 6s3.13 6 7 6c.69 0 1.36-.09 1.98-.26l2.25 1.13c.22.11.46-.11.38-.35l-.59-1.78C23.95 17.65 25 15.93 25 14c0-3.31-3.13-6-7-6z"/></svg>
-          <span>微信助手</span>
+          <span>${user.wechat_bound ? '微信已绑定' : '绑定微信'}</span>
         </button>
       `;
       dock.innerHTML = html;
@@ -716,6 +888,6 @@
     }
   }
 
-  // Periodic DOM check
-  setInterval(refreshUI, 1200);
+  // Periodic DOM check & permission enforcement
+  setInterval(refreshUI, 600);
 })();

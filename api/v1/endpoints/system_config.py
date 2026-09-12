@@ -48,6 +48,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _assert_admin():
+    """Ensure current user is admin in multi-user mode."""
+    try:
+        from src.tenancy.context import current_principal, ROLE_ADMIN, multiuser_enabled
+        if multiuser_enabled():
+            p = current_principal()
+            if p is not None and p.role != ROLE_ADMIN:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "forbidden", "message": "普通成员无权访问或修改系统设置，请联系管理员"}
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[system_config] failed to probe admin role: %s", exc)
+
+
 @router.get(
     "/scheduler/status",
     summary="Get runtime scheduler status",
@@ -147,6 +164,7 @@ def get_system_config(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> SystemConfigResponse:
     """Load and return current system configuration."""
+    _assert_admin()
     try:
         payload = service.get_config(include_schema=include_schema)
         return SystemConfigResponse.model_validate(payload)
@@ -378,6 +396,7 @@ def update_system_config(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> UpdateSystemConfigResponse:
     """Validate and persist system configuration updates."""
+    _assert_admin()
     try:
         payload = service.update(
             config_version=request.config_version,

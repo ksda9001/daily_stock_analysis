@@ -59,11 +59,12 @@ def _sync_tenancy_system_owner() -> None:
 
 
 class LoginRequest(BaseModel):
-    """Login request body. For first-time setup use password + password_confirm."""
+    """Login request body. Supports username for multi-user login, or password only for admin."""
 
     model_config = {"populate_by_name": True}
 
-    password: str = Field(default="", description="Admin password")
+    username: str | None = Field(default=None, description="Username for multi-user login")
+    password: str = Field(default="", description="Admin or user password")
     password_confirm: str | None = Field(default=None, alias="passwordConfirm", description="Confirm (first-time)")
 
 
@@ -180,6 +181,16 @@ def _get_auth_status_dict(request: Request | None = None) -> dict:
     if auth_enabled and request:
         cookie_val = request.cookies.get(COOKIE_NAME)
         logged_in = verify_session(cookie_val) if cookie_val else False
+        if not logged_in:
+            try:
+                from src.tenancy.middleware import resolve_request_principal
+                from src.tenancy.context import multiuser_enabled
+                if multiuser_enabled():
+                    principal = resolve_request_principal(request)
+                    if principal is not None:
+                        logged_in = True
+            except Exception:
+                pass
 
     # setupState determination:
     # - enabled: auth is active
@@ -408,6 +419,36 @@ async def auth_login(request: Request, body: LoginRequest):
             },
         )
 
+    username = (body.username or "").strip()
+    if username and username.lower() != "admin":
+        from src.tenancy.context import multiuser_enabled
+        if not multiuser_enabled():
+            return JSONResponse(
+                status_code=400,
+                content={"error": "multiuser_disabled", "message": "多用户模式未启用"},
+            )
+        from src.tenancy.service import authenticate, issue_api_token, mark_login
+        user = authenticate(username, password)
+        if user is None:
+            record_login_failure(ip)
+            return JSONResponse(
+                status_code=401,
+                content={"error": "invalid_credentials", "message": "用户名或密码错误"},
+            )
+        clear_rate_limit(ip)
+        mark_login(user.id)
+        token = issue_api_token(user.id, actor=None, client_ip=ip)
+        resp = JSONResponse(content={"ok": True, "user": user.to_public_dict()})
+        resp.set_cookie(
+            key="dsa_user_token",
+            value=token,
+            max_age=30 * 86400,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return resp
+
     password_set = is_password_set()
 
     if not password_set:
@@ -451,6 +492,21 @@ async def auth_login(request: Request, body: LoginRequest):
 
     resp = JSONResponse(content={"ok": True})
     _set_session_cookie(resp, session_val, request)
+    try:
+        from src.tenancy.context import SYSTEM_TENANT_ID, multiuser_enabled
+        from src.tenancy.service import issue_api_token
+        if multiuser_enabled():
+            admin_token = issue_api_token(SYSTEM_TENANT_ID, actor=None, client_ip=ip)
+            resp.set_cookie(
+                key="dsa_user_token",
+                value=admin_token,
+                max_age=30 * 86400,
+                httponly=True,
+                samesite="lax",
+                path="/",
+            )
+    except Exception:
+        pass
     return resp
 
 
@@ -505,4 +561,5 @@ async def auth_logout(request: Request):
         )
     resp = Response(status_code=204)
     resp.delete_cookie(key=COOKIE_NAME, path="/")
+    resp.delete_cookie(key="dsa_user_token", path="/")
     return resp
