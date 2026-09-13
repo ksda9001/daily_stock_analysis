@@ -168,7 +168,7 @@ CowAgent 读 `~/cow/mcp.json`，格式与 Claude Desktop / Cursor 基本一致�
 但那只在 `args: ["/abs/path/server.py"]` 这种写法下生效。）
 
 **③ 加 `tool_name_prefix`。**
-26 个工具里有 `get_watchlist`、`get_usage_summary` 这种通用名，很容易和
+29 个工具里有 `get_watchlist`、`get_usage_summary` 这种通用名，很容易和
 CowAgent 内置工具或其他 MCP 服务器撞名。加 `dsa_` 前缀后工具名变成
 `dsa_add_to_watchlist`，不会冲突。
 
@@ -185,11 +185,11 @@ CowAgent 容器里的 `127.0.0.1` 是它自己，不是 DSA。同网络下直接
 看 CowAgent 启动日志（`docker logs cowagent | grep MCP`）：
 
 ```
-[MCP] Server 'dsa' ready — 26 tool(s)
-1/1 server(s) ready, 26 tool(s) available
+[MCP] Server 'dsa' ready — 29 tool(s)
+1/1 server(s) ready, 29 tool(s) available
 ```
 
-`26 tool(s)` 就是对的。如果只有 `0`，说明子进程没起来 —— 九成是 ① 或 ②。
+`29 tool(s)` 就是对的。如果只有 `0`，说明子进程没起来 —— 九成是 ① 或 ②。
 
 ---
 
@@ -426,7 +426,7 @@ python scripts/e2e_mcp_chain.py --verbose   # 失败时自动打印服务端日�
 
 - **MCP → DSA 全链路（23/23 断言通过）**：真实服务 + 真实 stdio + 真实 HTTP + 真实 Token
 - **跨用户隔离在 MCP 层依然成立**：bob 拿自己的 Token 看不到 alice 的自选
-- MCP 服务器与标准客户端完成 stdio 握手，26 个工具全部注册成功
+- MCP 服务器与标准客户端完成 stdio 握手，29 个工具全部注册成功
 - `tools/list`、`tools/call` 正常；工具失败返回结构化 JSON 而非协议错误
 - 子进程**不继承**父进程环境变量（所以 `env` 必须显式写）
 - 中文内容经 stdio 往返无损
@@ -435,8 +435,8 @@ python scripts/e2e_mcp_chain.py --verbose   # 失败时自动打印服务端日�
 
 **已实测（生产服务器，CowAgent 真实部署）：**
 
-- **CowAgent 侧 `[MCP] Server 'dsa' ready — 26 tool(s)`**，
-  `1/1 server(s) ready, 26 tool(s) available` —— MCP 子进程真实拉起、握手成功
+- **CowAgent 侧 `[MCP] Server 'dsa' ready — 29 tool(s)`**，
+  `1/1 server(s) ready, 29 tool(s) available` —— MCP 子进程真实拉起、握手成功
 - **容器内 stdio 端到端 6/6 通过**：`whoami` → `cowagent`；
   `get_watchlist` 继承到全局列表；`get_my_usage` 归属到 `tenant_id: 2`
 - **HTTP 侧多租户 12/12 通过**：签发 Token、`/auth/me`、自选增删、
