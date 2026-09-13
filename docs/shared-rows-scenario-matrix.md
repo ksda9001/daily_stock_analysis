@@ -202,6 +202,39 @@ isolation; wrap it in bypass_tenant_scope() or use the ORM path.
 **测试**：`RawSqlAuditTests`（3 例）：严格模式下 ORM 写入放行、裸写仍被拦、
 默认模式不产生误导告警。
 
+### 4.3b 【部署后发现】同一盲区的另一半：ORM UPDATE 也被误判
+
+**发现方式**：生产部署后的真实验证。由普通用户触发一次大盘复盘，
+保存历史时日志出现：
+
+```
+[tenancy] raw SQL touches tenant table 'analysis_history' without tenant
+isolation and is NOT filtered.
+SQL: UPDATE analysis_history SET tenant_id=:tenant_id, id=:id, query_id=:query_id, ...
+```
+
+**根因**：与 §4.3 是**同一个盲区**。ORM 的 UPDATE 同样由 flush 的
+unit-of-work 发出，同样不经过 `do_orm_execute`、同样拿不到 `_TENANCY_MARKER`。
+而 §4.3 的白名单只认 `Insert`，于是 UPDATE 落进审计。
+（`SET tenant_id=:tenant_id, id=:id, ...` 的**全列写回**正是 SQLAlchemy
+ORM UPDATE 的特征句式，裸 SQL 不会长这样。）
+
+**影响**：生产未开严格模式 → 每次保存复盘都刷一条误导性 warn；
+一旦开启 → 保存历史直接失败，且报错同样建议「改用 ORM 路径」。
+
+**处置**：`_is_orm_tenant_insert()` → `_is_orm_tenant_write()`，
+同时接受 `Insert` 与 `Update`。ORM 的 `Delete` 走 `do_orm_execute`
+自带标记，**显式排除**（放行会掩盖真正的裸 DELETE）。
+
+**教训**：§4.3 修完时我以为「ORM 写入」这一类已经收口，实际只覆盖了
+INSERT。**按「症状」修不如按「机制」修** —— 当时若问一句
+「还有哪些语句走 flush 而不走 `do_orm_execute`」，UPDATE 会被一起发现。
+单测也没有覆盖 INSERT 之外的写路径，所以 375 个绿灯没能拦住它。
+
+**测试**：`RawSqlAuditTests` 补 4 例 —— ORM UPDATE 严格模式可过 /
+不留误导 warn / 裸 UPDATE 仍被拦 / ORM DELETE 仍受租户谓词约束。
+已用 `git stash` 回退生产代码确认前两例确实变红。
+
 ### 4.4 【待观察】调度扇出可能重复落库大盘复盘
 
 **机制**：`_run_tenant_fanout()` **刻意串行**地为每个用户跑一次分析
@@ -310,3 +343,99 @@ curl -s -X DELETE "$DSA/api/v1/history/by-code/MARKET" -H "Cookie: dsa_user_toke
 ```
 
 **期望**：HTTP 200 + `{"deleted": 0}`（**不是 500**）。
+
+---
+
+## 6. 部署实测结果（2026-09-13）
+
+环境：服务器 `172.245.211.211`，镜像 `dsa-fork:deploy`（`sha256:466b171f…`）
++ `cowagent-dsa:latest`（含 29 工具）。代码版本 `7a0a3ec`。
+
+### 6.1 迁移：存量复盘已改判为共享行
+
+启动时应出现：
+
+```
+[tenancy] moved 2 shared row(s) in analysis_history to tenant_id=0
+```
+
+2 条存量 `market_review`（原 `tenant_id=1`）已搬到 `SHARED_TENANT_ID=0`。
+**再启动一次不再搬**（第二次启动无该日志）—— 幂等成立。
+
+### 6.2 共享行可见性（三用户对照）
+
+| 用户 | `tenant_id` | 可见历史条数 | 明细 |
+|---|---|---|---|
+| `admin` | 1 | **3** | 自己的 `600206/full` + 2 条共享复盘 |
+| `cowagent` | 2 | **2** | 仅共享复盘 |
+| `trader01` | 3 | **2** | 仅共享复盘 |
+
+**结论**：大盘复盘对全部租户可见；私有报告仍严格隔离
+（cowagent / trader01 看不到 admin 的 `600206/full`）。两个方向都成立。
+
+### 6.3 归属：普通用户触发的复盘落为共享行
+
+由 `trader01`（普通用户）经 `POST /api/v1/analysis/market-review` 触发，
+走后台线程池路径（**正是原先丢身份的那条链路**）。实测落库：
+
+```
+(id=4, code='MARKET', report_type='market_review', tenant_id=0)
+```
+
+**`tenant_id=0`，不是 1。** 修复前该路径必然盖成 `tenant_id=1`。
+
+### 6.4 删除权责分离
+
+| 调用方 | 请求 | 修复前 | 修复后实测 |
+|---|---|---|---|
+| `trader01`（普通） | `DELETE /api/v1/history/by-code/MARKET` | **500** | **200 + `{"deleted": 0}`** |
+| `admin` | 同上 | — | **200 + `{"deleted": 2}`** |
+
+普通用户「查得到但删不掉」不再报错；管理员仍能清理共享行。
+
+### 6.5 MCP 工具已就位
+
+CowAgent 启动日志：
+
+```
+[MCP] Server 'dsa' ready — 29 tool(s)
+[ToolManager] MCP loading complete: 1/1 server(s) ready, 29 tool(s) available
+```
+
+新增的 `dsa_trigger_market_review` / `dsa_list_market_reviews` /
+`dsa_get_latest_market_review` 均在列。
+
+### 6.6 C3：调度扇出未观察到重复落库
+
+复盘执行有**进程内 `threading.Lock` + 同宿主 `flock`** 双重去重
+（`src/core/market_review_lock.py`），API / CLI / 调度三入口共用。
+本次实测触发 1 次 → 落库 1 条。**未观察到重复**。
+注意该锁**不跨主机/容器**，多实例部署需外部幂等。
+
+### 6.7 前端注入层完好
+
+静态资源逐字节核对（经公网 `https://fi.myfi.cc.cd/`）：
+
+| 路径 | 实测 md5 | 结论 |
+|---|---|---|
+| `/dsa-wechat.js` | `1fa89b31c5b593c1b693a4a6f9cb8963` | 与仓库一致（58018 B） |
+| `/index.html` | `ada2e8883239e9e776a93655e2f04eae` | 与仓库一致 |
+| `/assets/index-Dhkgyx-b.js` | `3a45b4fb70a9c9762e900bf6369e1637` | 与仓库一致 |
+| `/assets/LoginPage-_15D7jin.js` | `56d03c5ccb3383136cf108e191416482` | 与仓库一致 |
+
+⚠️ **静态挂载根是 `/`，不是 `/static/`**。请求 `/static/dsa-wechat.js`
+会落进 SPA 回退、返回 `index.html`（HTTP 200 但内容是 HTML）——
+排查时不要被这个 200 骗到，**要比 md5，不要只看状态码**。
+
+### 6.8 本轮新增修复：裸 SQL 审计误判 ORM UPDATE
+
+部署后实测发现的**新缺陷**（详见 §7）。
+
+### 6.9 未覆盖 / 待观察
+
+- `DSA_TENANCY_STRICT_RAW_SQL` 在生产**未开启**。严格模式的代码正确性
+  由单测覆盖（35 个用例含 4 个 UPDATE 方向），但**未在生产实测**。
+- 调度（08:45 / 18:00 自动任务）在本次验证窗口内未自然触发，
+  C3 的「按日不重复」结论来自锁机制与单次实测，**非跨日观察**。
+- 微信通道未扫码接入（`weixin` 通道待 QR 登录），
+  微信侧的大盘复盘查看路径未实测。
