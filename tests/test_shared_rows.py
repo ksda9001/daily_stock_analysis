@@ -663,6 +663,97 @@ class RawSqlAuditTests(SharedRowTestBase):
             "ORM 写入不应被记为裸 SQL",
         )
 
+    # ------------------------------------------------------------------
+    # UPDATE：与 INSERT 同属 flush 内部发出的语句，必须同样放行
+    # ------------------------------------------------------------------
+
+    def test_orm_update_passes_strict_audit(self) -> None:
+        """修改自己的行，严格模式下必须成功。
+
+        ORM 的 UPDATE 与 INSERT 一样由 flush 的 unit-of-work 发出，既不带
+        ``_TENANCY_MARKER`` 也不走 ``do_orm_execute``。若审计只放行 INSERT，
+        这里会抛 TenantScopeError —— 生产上的表现是「大盘复盘保存历史时
+        报裸 SQL 告警」（默认模式）或「保存直接失败」（严格模式）。
+        """
+        from src.storage import AnalysisHistory
+
+        os.environ["DSA_TENANCY_STRICT_RAW_SQL"] = "true"
+        alice = tenancy_service.create_user(username="alice", password="pass1234")
+
+        with bind_user(alice.id, username="alice"):
+            row_id = self._add_history("600519")
+
+        with bind_user(alice.id, username="alice"):
+            with self.db.session_scope() as session:
+                row = session.get(AnalysisHistory, row_id)
+                row.sentiment_score = 88
+
+        self.assertEqual(self._raw_tenant_id(row_id), alice.id)
+
+    def test_orm_update_does_not_raise_raw_sql_warning(self) -> None:
+        """默认模式下，ORM 的 UPDATE 不该留下误导性告警。"""
+        from src.storage import AnalysisHistory
+        from src.tenancy import scope as scope_module
+
+        alice = tenancy_service.create_user(username="alice", password="pass1234")
+        with bind_user(alice.id, username="alice"):
+            row_id = self._add_history("600519")
+
+        with bind_user(alice.id, username="alice"):
+            with self.db.session_scope() as session:
+                session.get(AnalysisHistory, row_id).sentiment_score = 77
+
+        self.assertNotIn(
+            "Update:analysis_history",
+            scope_module._raw_sql_warned,
+            "ORM 的 UPDATE 不应被记为裸 SQL",
+        )
+
+    def test_raw_sql_update_still_blocked_in_strict_mode(self) -> None:
+        """反向断言：放行 ORM UPDATE，不得把真正的裸 UPDATE 也放行。
+
+        裸写的单列 UPDATE 不会被展开成全列，也不带 ``tenant_id``，
+        因此仍会被拦住。
+        """
+        from sqlalchemy import text
+
+        from src.tenancy.scope import TenantScopeError
+
+        os.environ["DSA_TENANCY_STRICT_RAW_SQL"] = "true"
+        alice = tenancy_service.create_user(username="alice", password="pass1234")
+
+        with bind_user(alice.id, username="alice"):
+            self._add_history("600519")
+
+        with bind_user(alice.id, username="alice"):
+            with self.assertRaises(TenantScopeError):
+                with self.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "UPDATE analysis_history SET sentiment_score = 99 "
+                            "WHERE code = '600519'"
+                        )
+                    )
+
+    def test_orm_delete_still_goes_through_tenant_predicate(self) -> None:
+        """ORM 的 DELETE 走 ``do_orm_execute``（带租户标记），不能被误放行。"""
+        from src.storage import AnalysisHistory
+
+        alice = tenancy_service.create_user(username="alice", password="pass1234")
+        bob = tenancy_service.create_user(username="bob", password="pass1234")
+
+        with bind_user(alice.id, username="alice"):
+            self._add_history("600519")
+
+        with bind_user(bob.id, username="bob"):
+            with self.db.session_scope() as session:
+                deleted = (
+                    session.query(AnalysisHistory)
+                    .filter(AnalysisHistory.code == "600519")
+                    .delete(synchronize_session=False)
+                )
+            self.assertEqual(deleted, 0, "bob 不得删到 alice 的行")
+
 
 if __name__ == "__main__":
     unittest.main()

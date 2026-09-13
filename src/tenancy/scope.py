@@ -52,7 +52,7 @@ from typing import Iterator, Optional, Set
 from sqlalchemy import event, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, with_loader_criteria
-from sqlalchemy.sql.dml import Insert
+from sqlalchemy.sql.dml import Insert, Update
 from sqlalchemy.sql.schema import Table
 
 from src.tenancy.context import (
@@ -408,20 +408,28 @@ def _on_before_flush(session: Session, flush_context, instances) -> None:
             setattr(obj, "tenant_id", tenant_id)
 
 
-def _is_orm_tenant_insert(clauseelement) -> bool:
-    """判断语句是否为「ORM 写入租户表」产生的 INSERT。
+def _is_orm_tenant_write(clauseelement) -> bool:
+    """判断语句是否为「ORM 写入租户表」产生的 INSERT / UPDATE。
 
     这类语句的隔离**不依赖 WHERE 谓词**，而是由 :func:`_on_before_flush`
-    在 flush 前给对象盖上 ``tenant_id``。它们也不会经过
-    ``do_orm_execute``（flush 是会话内部操作），因此拿不到
-    :data:`_TENANCY_MARKER` —— 若不单独识别，就会被下面的裸 SQL 审计
-    误判。严格模式下这会表现为「**所有写入都失败**」，而且报错信息还会
-    建议「改用 ORM 路径」，而调用方本来就在用 ORM。
+    在 flush 前给对象盖上 ``tenant_id``；UPDATE 再由主键定位，天然只能改
+    到自己那些行。它们也不会经过 ``do_orm_execute``（flush 是会话内部
+    操作），因此拿不到 :data:`_TENANCY_MARKER` —— 若不单独识别，就会被
+    下面的裸 SQL 审计误判。严格模式下这会表现为「**所有写入都失败**」，
+    而且报错信息还会建议「改用 ORM 路径」，而调用方本来就在用 ORM。
 
-    判据：语句是 ``Insert`` 且目标表带 ``tenant_id`` 列。裸写的
-    ``INSERT INTO t (code, ...)`` 不带该列，仍会被正常审计。
+    三种语句的可见性不同，必须分开判断：
+
+    * **INSERT** —— 隔离靠 flush 盖章。判据：目标表带 ``tenant_id`` 列。
+      裸写的 ``INSERT INTO t (code, ...)`` 不带该列，仍会被正常审计。
+    * **UPDATE** —— 同理由 flush 发出，SQLAlchemy 的 unit-of-work 会把
+      实体**全部列**写回（含 ``tenant_id``），且带上主键 WHERE。判据同上。
+      裸写的 ``UPDATE t SET ...`` 不会被展开成全列，也不带 ``tenant_id``。
+    * **DELETE** —— ORM 发出的 ``Delete`` 会经过 ``do_orm_execute``，因此
+      已带 :data:`_TENANCY_MARKER`，**不应**在此放行（放行会掩盖真正的
+      裸 DELETE）。故显式排除。
     """
-    if not isinstance(clauseelement, Insert):
+    if not isinstance(clauseelement, (Insert, Update)):
         return False
     table = getattr(clauseelement, "table", None)
     columns = getattr(table, "c", None)
@@ -438,7 +446,8 @@ def install_raw_sql_audit(engine: Engine) -> None:
 
     ORM 的 SELECT / UPDATE / DELETE 会在 :func:`_on_do_orm_execute` 中
     被打上标记，因此这里只关心「未打标记且引用了租户表」的语句。ORM 的
-    INSERT 不走那条路径（见 :func:`_is_orm_tenant_insert`），需要单独放行。
+    INSERT / UPDATE 不走那条路径（见 :func:`_is_orm_tenant_write`），
+    需要单独放行。
 
     默认仅告警一次；设置 ``DSA_TENANCY_STRICT_RAW_SQL=true`` 后直接报错。
     """
@@ -448,7 +457,7 @@ def install_raw_sql_audit(engine: Engine) -> None:
             return
         if execution_options.get(_TENANCY_MARKER):
             return
-        if _is_orm_tenant_insert(clauseelement):
+        if _is_orm_tenant_write(clauseelement):
             return
 
         sql = str(clauseelement)
