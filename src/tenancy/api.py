@@ -34,6 +34,7 @@ from src.tenancy.settings import (
     WatchlistError,
     add_user_stock,
     delete_user_settings,
+    extract_inquired_stocks,
     public_settings_view,
     remove_user_stock,
     replace_user_stock_list,
@@ -204,6 +205,14 @@ class WatchlistReplaceRequest(BaseModel):
     )
 
     model_config = {"populate_by_name": True}
+
+
+class WatchlistInquireRequest(BaseModel):
+    wechat_id: str = Field(..., alias="wechatId", description="微信用户唯一标识")
+    query: str = Field(..., description="用户咨询文本")
+
+    model_config = {"populate_by_name": True}
+
 
 
 class WeChatBindRequest(BaseModel):
@@ -685,6 +694,60 @@ async def delete_watchlist_item(
         return _watchlist_error(exc)
     logger.info("[tenancy] user %s 移除自选 %s", principal.username, result["removed"])
     return {"ok": True, "user_id": principal.user_id, **result}
+
+
+@router.post("/watchlist/inquire", summary="处理微信用户咨询股票并自动加入自选")
+async def inquire_watchlist(payload: WatchlistInquireRequest) -> Dict[str, Any]:
+    wx_id = (payload.wechat_id or "").strip()
+    bound = service.get_user_by_wechat_id(wx_id)
+    if bound is None:
+        return {
+            "ok": False,
+            "reason": "unbound_recipient",
+            "message": "该微信尚未绑定账号",
+            "stocks": [],
+        }
+
+    stocks = extract_inquired_stocks(payload.query)
+    if not stocks:
+        return {
+            "ok": True,
+            "user_id": bound.id,
+            "username": bound.username,
+            "stocks": [],
+            "action": "none",
+        }
+
+    added_list = []
+    stock_labels = []
+    for code, name in stocks:
+        try:
+            res = add_user_stock(bound.id, code)
+            newly_added = not res.get("already_present", False)
+            added_list.append({
+                "code": code,
+                "name": name,
+                "newly_added": newly_added,
+            })
+            label = f"{name}({code})" if name else code
+            stock_labels.append(label)
+            logger.info("[tenancy] 用户 %s 咨询股票自动加自选: %s (%s)", bound.username, code, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[tenancy] failed to auto-add %s for user %s: %s", code, bound.id, exc)
+
+    notice = ""
+    if stock_labels:
+        stocks_str = "】、【".join(stock_labels)
+        notice = f"📌 已默认将【{stocks_str}】添加到您的自选股，交易日 09:35/15:30 将为您定时推送行情。"
+
+    return {
+        "ok": True,
+        "user_id": bound.id,
+        "username": bound.username,
+        "stocks": added_list,
+        "notice": notice,
+    }
+
 
 
 # ---------------------------------------------------------------------------

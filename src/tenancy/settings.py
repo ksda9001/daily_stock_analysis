@@ -723,3 +723,70 @@ def reset_user_stock_list(tenant_id: int) -> Dict[str, Any]:
     """清空个人自选，回落到全局配置。"""
     delete_user_settings(tenant_id, ["STOCK_LIST"])
     return resolve_stock_list(tenant_id)
+
+
+def extract_inquired_stocks(query: str) -> List[Tuple[str, str]]:
+    """从用户咨询文本中提取股票列表 [(code, name), ...]。
+
+    - 排除负向/删除/管理类指令（如“删除”、“移除”、“清空”、“查看自选”、“解绑”等）；
+    - 支持股票全名/别名识别（结合分词管道与名称库）；
+    - 支持直接 5-6 位股票代码提取；
+    - 结果去重保序。
+    """
+    if not query or not isinstance(query, str):
+        return []
+
+    text = query.strip()
+    negative_patterns = [
+        r"删除", r"移除", r"去掉", r"清空", r"取消.*自选",
+        r"查看.*自选", r"我的自选", r"自选列表", r"自选股列表",
+        r"解绑", r"登录", r"绑定", r"whoami", r"我的账号",
+    ]
+    for pat in negative_patterns:
+        if re.search(pat, text, re.IGNORECASE):
+            return []
+
+    found_stocks: List[Tuple[str, str]] = []
+    seen_codes: set = set()
+
+    # 1. 尝试使用分词层识别股票实体
+    try:
+        from src.agent.web_intent_tokenizer import _preprocess_text
+        _, tokens = _preprocess_text(text)
+        for t in tokens:
+            if getattr(t, "stocks", None):
+                for s in t.stocks:
+                    code = str(s.code).strip().upper()
+                    name = str(s.name or "").strip()
+                    if code and code not in seen_codes:
+                        seen_codes.add(code)
+                        found_stocks.append((code, name))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[extract_inquired_stocks] tokenizer skipped: %s", exc)
+
+    # 2. 正则提取 A 股 / 港股代码
+    code_matches = re.findall(
+        r"\b(00\d{4}|30\d{4}|60\d{4}|68\d{4}|43\d{4}|83\d{4}|87\d{4}|92\d{4})\b",
+        text,
+    )
+    hk_matches = re.findall(r"\b(HK\d{5}|0\d{4})\b", text, re.IGNORECASE)
+
+    all_raw_codes = code_matches + hk_matches
+    for raw in all_raw_codes:
+        code = str(raw).strip().upper()
+        if code.startswith("HK"):
+            code = code[2:]
+        if code and code not in seen_codes:
+            name = ""
+            try:
+                from src.services.name_to_code_resolver import lookup_stock_by_code
+                st = lookup_stock_by_code(code)
+                if st:
+                    name = getattr(st, "name", "") or ""
+            except Exception:  # noqa: BLE001
+                pass
+            seen_codes.add(code)
+            found_stocks.append((code, name))
+
+    return found_stocks
+
