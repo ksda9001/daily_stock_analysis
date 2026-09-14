@@ -124,18 +124,34 @@
        菜单项越多越严重 —— 管理员比普通用户多 3 个注入项（用户管理/绑定微信/
        个人通知），所以管理员账户最容易撞上。
 
-       修法：让 nav 不再抢高度、改为自身可滚动；退出按钮固定在底部且不被压缩。
-       只加给移动端抽屉，桌面端行为完全不变。 */
+       ⚠️ 第一版修法走过弯路，务必保留这段结论：
+       曾把 nav 改成 flex 0 1 auto（想让它让出高度），结果 nav 为了塞进父容器
+       **去压缩自己的子项**而不是滚动 —— 原生 NavLink 全是
+       flex-shrink:1 + min-height:auto，8 个导航项 + Settings 共 9 项
+       被压成一条条细线（实测：视口 800→28px、720→19px、640→10px、
+       560→2px，而注入项与退出按钮纹丝不动）。
+       所以正确做法不是让 nav 变矮，而是：
+         a) nav 保持 flex-1 + overflow-y:auto，自身滚动；
+         b) **禁止 nav 的子项被压缩**（flex-shrink:0 + min-height），
+            这样内容超出时才会撑出滚动条，而不是被压扁。 */
     [role="dialog"][aria-modal="true"] nav {
-      flex: 0 1 auto !important;
+      flex: 1 1 auto !important;
       overflow-y: auto !important;
+      overflow-x: hidden !important;
       min-height: 0 !important;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
     }
     [role="dialog"][aria-modal="true"] nav::-webkit-scrollbar {
       display: none;
     }
-    [role="dialog"][aria-modal="true"] nav {
-      scrollbar-width: none;
+    /* 关键：子项一律不可压缩。高度交给内容自身（原生是
+       h-[var(--nav-item-height)]，注入项有 padding），
+       只在 min-height 上兜底一个最小值，避免任何情况下被压成细线。 */
+    [role="dialog"][aria-modal="true"] nav > * {
+      flex-shrink: 0 !important;
+      min-height: var(--nav-item-height, 44px);
     }
     /* 退出按钮：nav 之后紧跟的那个 button（SidebarNav 的结构如此）。
        恢复高度 + 禁止压缩，并把它钉在抽屉底部。 */
@@ -146,6 +162,29 @@
       min-height: var(--nav-item-height, 44px) !important;
       margin-top: auto !important;
       margin-bottom: 4px !important;
+    }
+
+    /* 4. 移动端：退出确认框被抽屉盖住（2026-09-14）
+       ------------------------------------------------------------------
+       症状：手机端点「退出」后什么都不发生，看起来像按钮没反应。
+       实测（360x800 移动端，管理员）：
+         · 点 Log out 后 elementFromPoint(视口中心) 命中的是 <a>Alerts</a>，
+           而**不是**对话框；
+         · body 的直接子节点里确实多了
+           div.fixed.inset-0.z-50.flex.items-center.justify-center.bg-black/60，
+           文本含 "Log out of the current session?"，z=50、opacity=1、可见；
+         · 抽屉（Drawer 第 68 行）与 ConfirmDialog（第 40 行）**都是 z-50**，
+           打平后由绘制顺序决定胜负，结果抽屉赢了。
+       为什么桌面端没这个问题：桌面走 <aside>（无遮挡），弹窗只要能盖住页面
+       就行；只有移动端「抽屉本身也是 z-50 全屏浮层」才会发生冲突。
+
+       修法：把这个 floating 确认层提到抽屉之上。选择器用它的特征类组合
+       （ConfirmDialog 没有 role 属性，且是唯一同时带 z-50 + bg-black/60 +
+       backdrop-blur-sm 的 fixed 全屏层），并限定在移动端断点，桌面端不动。 */
+    @media (max-width: 1023px) {
+      body > div.fixed.inset-0.z-50.items-center.justify-center {
+        z-index: 200 !important;
+      }
     }
 
     /* Hide settings link nav-item for non-admin users */
