@@ -132,7 +132,7 @@ class WatchlistInquireTests(unittest.TestCase):
 
         # 检查数据库中该用户的自选股
         user_stocks = resolve_stock_list(self.user.id)
-        self.assertIn("600519", user_stocks["stocks"])
+        self.assertIn("600519", user_stocks["stock_codes"])
 
     def test_watchlist_inquire_negative_query(self) -> None:
         resp = self.client.post(
