@@ -110,6 +110,44 @@
       margin-bottom: 4px !important;
     }
 
+    /* 3. 移动端抽屉：退出按钮原本看不见（管理员账户尤其明显）
+       ------------------------------------------------------------------
+       上面那组 aside 规则**只作用于桌面侧边栏**。移动端走的是 Drawer
+       （[role="dialog"][aria-modal="true"]），没有任何对应规则，于是：
+         · SidebarNav 根节点是 .flex.h-full.flex-col
+         · 中间 <nav> 带 flex-1 → 吃掉全部剩余高度
+         · 退出按钮排在 nav 之后 → 既被推出可视区，又被 flex 压扁
+       实测（390x844 移动端视口，管理员账户 12 个菜单项）：
+         nav flex-grow=1、高 702px；内容容器溢出 49px；
+         **退出按钮 height 只剩 2px**（h-[var(--nav-item-height)] 被
+         flexShrink 压没了），且位于可视区下方 49px。
+       菜单项越多越严重 —— 管理员比普通用户多 3 个注入项（用户管理/绑定微信/
+       个人通知），所以管理员账户最容易撞上。
+
+       修法：让 nav 不再抢高度、改为自身可滚动；退出按钮固定在底部且不被压缩。
+       只加给移动端抽屉，桌面端行为完全不变。 */
+    [role="dialog"][aria-modal="true"] nav {
+      flex: 0 1 auto !important;
+      overflow-y: auto !important;
+      min-height: 0 !important;
+    }
+    [role="dialog"][aria-modal="true"] nav::-webkit-scrollbar {
+      display: none;
+    }
+    [role="dialog"][aria-modal="true"] nav {
+      scrollbar-width: none;
+    }
+    /* 退出按钮：nav 之后紧跟的那个 button（SidebarNav 的结构如此）。
+       恢复高度 + 禁止压缩，并把它钉在抽屉底部。 */
+    [role="dialog"][aria-modal="true"] nav + button {
+      flex-shrink: 0 !important;
+      flex-grow: 0 !important;
+      height: var(--nav-item-height, 44px) !important;
+      min-height: var(--nav-item-height, 44px) !important;
+      margin-top: auto !important;
+      margin-bottom: 4px !important;
+    }
+
     /* Hide settings link nav-item for non-admin users */
     .dsa-hide-settings a[href="/settings"],
     .dsa-hide-settings a[href="#/settings"] {
