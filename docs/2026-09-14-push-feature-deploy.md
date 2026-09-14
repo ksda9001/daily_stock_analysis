@@ -204,6 +204,16 @@ docker tag cowagent-dsa:pre-push-20260914 cowagent-dsa:latest
      `action.suppress`，不是扁平字段
 5. **`ssh_run.py` 有内部超时**，长 sleep（>10 分钟）会抛 `socket.timeout`。
    需要等待用 `nohup setsid ... &` 放后台 + 轮询产物文件。
+6. **租户库是 `/app/data/stock_analysis.db`，不是 `/app/data/dsa.db`。**
+   `dsa.db` 存在但是 **0 字节**，`sqlite3` 打开它不会报错，只会说
+   `no such table` —— 很容易误判成「表没建」。
+   `dsa_users` / `dsa_user_settings` / `dsa_tenancy_audit` 都在
+   `stock_analysis.db`（39 张表）里。
+   **判断库里有没有表，先按文件大小筛一遍**，别只凭路径猜。
+7. **临时改配置用 `ON CONFLICT(tenant_id, key)` 而不是 `UPDATE`。**
+   用户可能从未设过该项（本次 3 个租户的 `PUSH*` 行数为 0），
+   `UPDATE` 会静默影响 0 行、看起来「改了」其实没改。
+   `dsa_user_settings` 的唯一约束是 `(tenant_id, key)`，支持 upsert。
 
 ## 5. 实测验证结果（2026-09-14）
 
@@ -292,4 +302,112 @@ force=true        → {"skip": false, "slot": "09:35",
 | `weixin_channel.py` 门禁补丁 | 4 处 |
 | `web_channel.py` `_resolve_channel_manager` | 9 处 |
 | 权限模式 | `read-only` / `SELF_EVOLUTION_ENABLED=False` |
+
+### 5.6 到点轮询实跑（整条链路的决定性证据）
+
+前四节都是**分环节**验证。本节点是把任务放在那儿让它自己跑一次，
+观察「调度 → MCP → DSA → 抑制 → 不投递」是否是**同一条链路**真的连通。
+
+任务 `next_run_at=2026-09-14T18:58:02`，到点后实测日志：
+
+```
+[18:58:03][scheduler_service.py:114] [Scheduler] Executing task:
+    dsa-push-weixin-o9cq...@im.wechat - DSA 行情推送（大盘 + 自选股）
+[18:58:03][integration.py:1138] [Scheduler] Task dsa-push-...:
+    Executing tool 'dsa_push_digest' with params {'wechat_id': 'o9cq...@im.wechat'}
+[18:58:03][mcp_tool.py:27] [McpTool] server=dsa tool=dsa_push_digest params={...}
+[18:58:03][mcp_client.py:325] [MCP:dsa] stderr: .../push/digest "HTTP/1.1 200 OK"
+[18:58:03][integration.py:1150] [Scheduler] Task dsa-push-...:
+    suppressed empty result, not delivered
+```
+
+`tasks.json` 随之推进：
+
+```json
+"last_run_at": "2026-09-14T18:58:03.079050",
+"next_run_at": "2026-09-14T19:13:03.079050"
+```
+
+**这一段日志为什么是决定性的**，逐行对应设计意图：
+
+1. `scheduler_service.py:114` —— 间隔调度器真按 `seconds=900` 醒来并派发，
+   说明任务不是「写进 JSON 就算完」的死记录。
+2. `integration.py:1138` —— 派发走的是 `tool_call` 分支，工具名
+   `dsa_push_digest` 与 `_PUSH_TOOL_NAME` 一致，参数带上了 `wechat_id`。
+3. `mcp_client.py:325` —— 真的跨进程打到了 DSA 的 `/push/digest`，
+   且 **HTTP 200**。这一步证明 MCP stdio 传输 + 内网寻址 + 服务账号鉴权
+   三段全通。
+4. `integration.py:1150` —— 拿到了 DSA 的 `{"skip": true}`，被
+   `_should_suppress_delivery` 判为「空结果」，于是**不投递**。
+
+第 4 行正是「一天里绝大多数轮询都不该发消息」的预期行为。
+18:58 不在 `["09:35","15:30"]` 之内，**不投递才是对的**；
+如果这里出现了投递，反而是 bug。
+
+**换句话说：本次「没收到微信消息」是预期结果，不是失败。**
+真正待确认的是「到点（09:35 / 15:30）时该发出去」，
+那需要跨过下一个推送时刻才能观察到（见 §6）。
+
+## 6. 尚未验证的一件事：真到点时是否真收到微信
+
+部署与链路都已验证通过，但**唯一没有实测到的是「到点 → 微信真收到」**。
+原因是本次观察窗口（18:58）不在推送时段内，按设计被抑制。
+
+### 6.1 怎么补这一次验证
+
+不需要改代码，也不需要等明天。把推送时间临时挪到「一分钟之后」即可：
+
+```bash
+# 1. 看当前时间，设成一个马上要到点的时刻（例：现在 14:20 → 设 14:22）
+date +%H:%M
+
+# 2. 改 cowagent 服务账号（dsa_users.id=2）的推送时间
+#    ⚠️ 库文件是 /app/data/stock_analysis.db，不是 dsa.db（后者是 0 字节空文件）
+#    表 dsa_user_settings 的列是 id / tenant_id / key / value / updated_at，
+#    唯一约束在 (tenant_id, key)，所以可以 ON CONFLICT
+docker exec dsa-server python -c "
+import sqlite3
+c = sqlite3.connect('/app/data/stock_analysis.db')
+c.execute(\"INSERT INTO dsa_user_settings (tenant_id, key, value, updated_at) \"
+          \"VALUES (2, 'PUSH_TIMES', '14:22', datetime('now')) \"
+          \"ON CONFLICT(tenant_id, key) DO UPDATE SET value=excluded.value, \"
+          \"updated_at=excluded.updated_at\")
+c.commit()
+print(c.execute(\"SELECT tenant_id,key,value FROM dsa_user_settings \"
+                \"WHERE tenant_id=2 AND key LIKE 'PUSH%'\").fetchall())
+"
+
+# 3. 等一轮轮询（间隔 900s）。不想等就重置 next_run_at 逼它立刻跑：
+#    改 tasks.json 后重启 cowagent 让调度器重载
+```
+
+到点后在**微信里直接看**是否收到「A股行情速览」。
+
+### 6.2 判据（三选一，按可信度排序）
+
+| 方式 | 看什么 | 注意 |
+|---|---|---|
+| **微信客户端** | 真收到消息 | 最直接，唯一无假阳性的判据 |
+| `tasks.json` | `last_run_at` 推进 | 只证明跑了，**不证明发出去了** |
+| `docker logs` | 有 `suppressed` 就是没发 | 若**没有** `suppressed` 且有投递动作 → 发了 |
+
+⚠️ **不要用 `grep` 转录来判「有没有发」**：提示词与工具描述里本身就含
+`dispatch` / `发送` 等字样，grep 会假阳性（§4.1 第 3 条同源教训）。
+
+### 6.3 验完记得改回去
+
+```bash
+# 恢复默认推送时间：删掉用户级覆盖行
+docker exec dsa-server python -c "
+import sqlite3
+c = sqlite3.connect('/app/data/stock_analysis.db')
+c.execute(\"DELETE FROM dsa_user_settings \"
+          \"WHERE tenant_id=2 AND key='PUSH_TIMES'\")
+c.commit()
+print('已删除，剩余：', c.execute(\"SELECT tenant_id,key,value \"
+      \"FROM dsa_user_settings WHERE tenant_id=2 AND key LIKE 'PUSH%'\").fetchall())
+"
+```
+
+删掉行 = 回落到 `DEFAULT_PUSH_TIMES`（`["09:35","15:30"]`）。
 
