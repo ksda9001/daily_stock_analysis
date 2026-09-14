@@ -64,7 +64,8 @@ class WatchlistInquireTests(unittest.TestCase):
             actor=None,
         )
         tenancy_service.bind_wechat(
-            self.user.id,
+            username="wechat_trader",
+            password="trader-password-123",
             wechat_id=TEST_WECHAT_ID,
             wechat_nickname="测试交易员",
         )
