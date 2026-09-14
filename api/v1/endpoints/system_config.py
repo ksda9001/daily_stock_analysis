@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -48,21 +50,192 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+_FORBIDDEN_MESSAGE = "普通成员无权访问或修改系统设置，请联系管理员"
+
+
+def _multiuser_principal():
+    """多用户模式下返回当前 ``Principal``；单用户模式返回 ``None``。
+
+    返回 ``None`` 表示「不受租户角色约束」—— 与改动前 ``_assert_admin`` 的
+    语义一致：单用户部署里系统设置本来就归本机用户所有。
+    """
+    try:
+        from src.tenancy.context import current_principal, multiuser_enabled
+
+        if not multiuser_enabled():
+            return None
+        return current_principal()
+    except Exception as exc:  # noqa: BLE001 - 探测失败时按「放行」处理，与旧行为一致
+        logger.warning("[system_config] failed to probe admin role: %s", exc)
+        return None
+
+
+def _is_restricted_principal(principal) -> bool:
+    """该主体是否受「普通成员」限制。"""
+    if principal is None:
+        return False
+    from src.tenancy.context import ROLE_ADMIN
+
+    return getattr(principal, "role", None) != ROLE_ADMIN
+
+
+def _forbidden_response(offending: Optional[Iterable[str]] = None) -> HTTPException:
+    detail: Dict[str, Any] = {"error": "forbidden", "message": _FORBIDDEN_MESSAGE}
+    if offending:
+        from src.tenancy.settings import USER_SCOPED_CONFIG_KEYS
+
+        detail["forbidden_keys"] = sorted(str(key) for key in offending)
+        detail["user_scoped_keys"] = sorted(USER_SCOPED_CONFIG_KEYS)
+    return HTTPException(status_code=403, detail=detail)
+
+
 def _assert_admin():
     """Ensure current user is admin in multi-user mode."""
-    try:
-        from src.tenancy.context import current_principal, ROLE_ADMIN, multiuser_enabled
-        if multiuser_enabled():
-            p = current_principal()
-            if p is not None and p.role != ROLE_ADMIN:
-                raise HTTPException(
-                    status_code=403,
-                    detail={"error": "forbidden", "message": "普通成员无权访问或修改系统设置，请联系管理员"}
-                )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("[system_config] failed to probe admin role: %s", exc)
+    principal = _multiuser_principal()
+    if _is_restricted_principal(principal):
+        raise _forbidden_response()
+
+
+def _user_scope_config_version(user_id: int) -> str:
+    """用户级配置的版本指纹。
+
+    ⚠️ **不能**复用全局 ``config_version`` —— 那是整个 ``.env`` 的
+    ``mtime:sha256``，把它交给普通成员等于泄露「全部密钥的哈希」。
+    这里只对用户自己有权看到的那几项做指纹。
+    """
+    from src.tenancy.settings import USER_SCOPED_CONFIG_KEYS, effective_config_value
+
+    parts = []
+    for key in sorted(USER_SCOPED_CONFIG_KEYS):
+        value, source = effective_config_value(key, user_id)
+        parts.append(f"{key}={source}:{value!r}")
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    return f"user-scope:{digest}"
+
+
+def _user_scoped_config_payload(payload: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+    """把系统配置响应裁剪成「该用户可以自己调整的那几项」。
+
+    ⚠️ 安全关键：这里是**按白名单重建**，不是「过滤后透传」。绝不能把
+    ``service.get_config()`` 的完整结果（LLM 密钥、Webhook、邮箱授权码……）
+    以任何形式交给普通成员。
+    """
+    from src.tenancy.settings import (
+        USER_SCOPED_CONFIG_KEYS,
+        effective_config_value,
+        encode_value,
+        get_spec,
+    )
+
+    schema_by_key = {
+        item.get("key"): item
+        for item in (payload.get("items") or [])
+        if isinstance(item, dict)
+    }
+
+    items: List[Dict[str, Any]] = []
+    for key in sorted(USER_SCOPED_CONFIG_KEYS):
+        template = schema_by_key.get(key)
+        if template is None:
+            continue
+        value, _source = effective_config_value(key, user_id)
+        spec = get_spec(key)
+        text = "" if value is None else (encode_value(spec, value) or "")
+        item = {
+            "key": key,
+            "value": text,
+            "raw_value_exists": value is not None,
+            "is_masked": False,
+        }
+        if "schema" in template:
+            item["schema"] = template["schema"]
+        items.append(item)
+
+    return {
+        "config_version": _user_scope_config_version(user_id),
+        "mask_token": payload.get("mask_token") or "******",
+        "items": items,
+        "llm_model_providers": [],
+        "updated_at": None,
+    }
+
+
+def _update_user_scoped_config(request, principal):
+    """普通成员的系统设置写入：只接受「用户级」键，写进该用户自己的设置。
+
+    与 ``.env`` 完全无关，因此：
+
+    * **不做**全局配置版本校验（用户改的是自己的偏好，跟 ``.env`` 变没变无关）；
+    * **不触发**运行时重载（按用户生效是读取时叠加的，无需重载）。
+    """
+    from src.tenancy.settings import (
+        KIND_BOOL,
+        USER_SCOPED_CONFIG_KEYS,
+        encode_value,
+        get_spec,
+        save_user_settings,
+    )
+
+    _BOOL_LITERALS = {"true", "false", "1", "0", "yes", "no", "on", "off", ""}
+
+    offending = [
+        item.key
+        for item in request.items
+        if (item.key or "").strip().upper() not in USER_SCOPED_CONFIG_KEYS
+    ]
+    if offending:
+        raise _forbidden_response(offending)
+
+    updates: Dict[str, Any] = {}
+    for item in request.items:
+        key = (item.key or "").strip().upper()
+        spec = get_spec(key)
+        if spec is None:
+            raise _forbidden_response([item.key])
+        if spec.kind == KIND_BOOL and str(item.value).strip().lower() not in _BOOL_LITERALS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_failed",
+                    "message": "System configuration validation failed",
+                    "issues": [
+                        {
+                            "key": key,
+                            "severity": "error",
+                            "message": "布尔项只接受 true/false（或 1/0、yes/no、on/off）",
+                        }
+                    ],
+                },
+            )
+        updates[key] = encode_value(spec, item.value)
+
+    written = save_user_settings(principal.user_id, updates)
+    if not written:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "validation_failed",
+                "message": "System configuration validation failed",
+                "issues": [{"key": k, "severity": "error", "message": "不支持的配置项"} for k in updates],
+            },
+        )
+
+    logger.info(
+        "[system_config] user %s updated user-scoped config: %s",
+        getattr(principal, "username", principal.user_id),
+        ",".join(sorted(written)),
+    )
+    return UpdateSystemConfigResponse.model_validate(
+        {
+            "success": True,
+            "config_version": _user_scope_config_version(principal.user_id),
+            "applied_count": len(written),
+            "skipped_masked_count": 0,
+            "reload_triggered": False,
+            "updated_keys": sorted(written),
+            "warnings": [],
+        }
+    )
 
 
 @router.get(
@@ -164,10 +337,14 @@ def get_system_config(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> SystemConfigResponse:
     """Load and return current system configuration."""
-    _assert_admin()
+    principal = _multiuser_principal()
     try:
         payload = service.get_config(include_schema=include_schema)
+        if _is_restricted_principal(principal):
+            payload = _user_scoped_config_payload(payload, principal.user_id)
         return SystemConfigResponse.model_validate(payload)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Failed to load system configuration: %s", exc, exc_info=True)
         raise HTTPException(
@@ -298,6 +475,8 @@ def test_generation_backend(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> TestGenerationBackendResponse:
     """Run a fixed generation backend smoke test."""
+    # ⚠️ 会真的发起一次模型请求，必须限管理员。
+    _assert_admin()
     try:
         payload = service.test_generation_backend(
             backend_id=request.backend_id,
@@ -396,7 +575,10 @@ def update_system_config(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> UpdateSystemConfigResponse:
     """Validate and persist system configuration updates."""
-    _assert_admin()
+    principal = _multiuser_principal()
+    # 普通成员只能改「用户级」配置，且写入的是自己的偏好而不是 `.env`。
+    if _is_restricted_principal(principal):
+        return _update_user_scoped_config(request, principal)
     try:
         payload = service.update(
             config_version=request.config_version,
@@ -597,6 +779,9 @@ def test_llm_channel(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> TestLLMChannelResponse:
     """Validate and test one channel definition without writing `.env`."""
+    # ⚠️ 必须限管理员：``use_saved_secret`` 会让服务端拿**已保存的**密钥去发请求，
+    # 普通成员若能调用，等于可以借用管理员的 LLM 额度。
+    _assert_admin()
     try:
         payload = service.test_llm_channel(
             name=request.name,
@@ -645,6 +830,8 @@ def test_notification_channel(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> TestNotificationChannelResponse:
     """Validate and test one notification channel without writing `.env`."""
+    # ⚠️ 同 ``test_llm_channel``：``use_saved_secret`` 会动用已保存的推送密钥。
+    _assert_admin()
     try:
         payload = service.test_notification_channel(
             channel=request.channel,
@@ -689,6 +876,8 @@ def discover_llm_channel_models(
     service: SystemConfigService = Depends(get_system_config_service),
 ) -> DiscoverLLMChannelModelsResponse:
     """Discover models for one channel definition without writing `.env`."""
+    # ⚠️ 同 ``test_llm_channel``：``use_saved_secret`` 会动用已保存的密钥。
+    _assert_admin()
     try:
         payload = service.discover_llm_channel_models(
             name=request.name,

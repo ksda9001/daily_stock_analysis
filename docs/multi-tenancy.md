@@ -218,24 +218,33 @@ SHARED_ROW_RULES = {
 这样上游所有读取 `config.<attr>` 的代码（通知发送、报告渲染、Agent 工具……）
 **完全不需要修改**就能按用户生效。改动面从「上百处读取点」收敛到「一个复制点」。
 
-调用点在 `main.py::run_full_analysis` 开头——API、调度器子进程、CLI 三条入口都经过它。
+调用点：`main.py::run_full_analysis` 开头（API、调度器子进程、CLI 三条入口都经过它），
+以及 Agent 问股端点（`api/v1/endpoints/agent.py::_request_config()`）。
+两者都收敛到同一个函数 `src/tenancy/settings.py::tenant_config()`。
+
+⚠️ 必须在**请求处理线程**里解析：`contextvars` 不跨线程，`run_in_executor`
+出来的 worker 里拿不到当前用户，所以要先解析好再把结果传进去。
 
 ### 5.2 可覆盖的配置项
 
-自选股、报告类型、Agent 模式、调度开关与时间，以及各通知渠道的凭据：
+自选股、报告类型、Agent 模式、问股上下文压缩，以及各通知渠道的凭据：
 
-`STOCK_LIST`、`REPORT_TYPE`、`AGENT_MODE`、`SCHEDULE_ENABLED`、`SCHEDULE_TIMES`、
+`STOCK_LIST`、`REPORT_TYPE`、`AGENT_MODE`、`AGENT_CONTEXT_COMPRESSION_ENABLED`、
 `WECHAT_WEBHOOK_URL`、`DINGTALK_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`FEISHU_WEBHOOK_SECRET`、
 `FEISHU_WEBHOOK_KEYWORD`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`EMAIL_SENDER`、
 `EMAIL_PASSWORD`、`EMAIL_RECEIVERS`、`SERVERCHAN3_SENDKEY`、`PUSHPLUS_TOKEN`、
 `PUSHOVER_USER_KEY`、`PUSHOVER_API_TOKEN`、`NTFY_URL`、`GOTIFY_URL`、`GOTIFY_TOKEN`、
 `DISCORD_WEBHOOK_URL`、`SLACK_WEBHOOK_URL`、`CUSTOM_WEBHOOK_URLS`、`ASTRBOT_URL`
 
+> ⚠️ 调度相关（`SCHEDULE_ENABLED` / `SCHEDULE_TIMES`）**不在**可覆盖之列 ——
+> 它们决定整机跑不跑、几点跑，属于基础设施配置，见 §5.3。
+
 ### 5.3 明确禁止用户覆盖
 
-`DATABASE_PATH`、`ADMIN_AUTH_ENABLED`、`DSA_MULTIUSER_ENABLED`、各 LLM 供应商密钥
-（`OPENAI_API_KEY`、`DEEPSEEK_API_KEY` …）、`LITELLM_CONFIG`、`LLM_CHANNELS`、
-`DSA_API_TOKEN_TTL_SECONDS`。
+`DATABASE_PATH`、`ADMIN_AUTH_ENABLED`、`DSA_MULTIUSER_ENABLED`、`SCHEDULE_ENABLED`、
+`SCHEDULE_TIMES`、`SCHEDULE_TIME`、各 LLM 供应商密钥（`OPENAI_API_KEY`、
+`DEEPSEEK_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、`QWEN_API_KEY`）、
+`LITELLM_CONFIG`、`LLM_CHANNELS`、`DSA_API_TOKEN_TTL_SECONDS`。
 
 这些属于**基础设施配置**：允许用户覆盖等于允许用户越权（改数据库路径、关掉鉴权、盗用 LLM 配额）。
 `save_user_settings` 会拒绝写入并记 WARNING；`apply_user_overrides` 也会二次过滤。
@@ -244,6 +253,45 @@ SHARED_ROW_RULES = {
 
 `GET /api/v1/tenancy/settings` 对 `secret=True` 的项做掩码（保留前 4 后 4 位），
 避免 Webhook / Token 明文出现在前端与日志里。
+
+---
+
+### 5.5 用户级系统配置：普通成员也能改的少数几项
+
+问股页的「上下文压缩」开关走的是 `PUT /api/v1/system/config`，而这个端点原本**只对管理员开放**。
+普通成员一按就得到 403「普通成员无权访问或修改系统设置」，开关永远存不上。
+
+修法是**开一个极小的白名单**，而不是放开整个端点：
+
+* `src/tenancy/settings.py::USER_SCOPED_CONFIG_KEYS` 声明哪些键允许普通成员自行调整；
+* **读取**：`GET /api/v1/system/config` 对普通成员**按白名单重建**响应体，只含这几项，
+  值是**生效值**（用户值 → 全局值），`llm_model_providers` 置空；
+* **写入**：`PUT /api/v1/system/config` 对普通成员**只接受白名单内的键**，且写入的是
+  `dsa_user_settings`，**不碰 `.env`**；因此不做全局版本校验、不触发运行时重载；
+* **版本号**：普通成员拿到 `user-scope:<sha256 前 16 位>`，只对这几项做指纹 ——
+  全局 `config_version` 是整个 `.env` 的 `mtime:sha256`，给出去等于泄露全部密钥的哈希。
+
+三条必须守住的边界（单测 `tests/test_system_config_user_scope.py`，14 例）：
+
+1. 普通成员的响应里**不得出现**任何非白名单键（LLM 密钥、Webhook、`DATABASE_PATH`……）；
+2. 混合请求**整批拒绝**（合法项也不能部分生效），避免「探测式」写入；
+3. 写入**不改动** `.env`，也不改动全局运行时 `Config`。
+
+### 5.6 系统设置端点的角色边界
+
+多用户模式下 `/api/v1/system/config*` 的角色要求：
+
+| 端点 | 要求 |
+|---|---|
+| `GET /config` | 管理员见全量；普通成员见白名单（§5.5） |
+| `PUT /config` | 管理员写 `.env`；普通成员写自己的 `dsa_user_settings`（§5.5） |
+| `GET /config/export`、`POST /config/import` | 管理员会话（`_allow_env_backup_access`） |
+| `POST /config/llm/test-channel`、`/config/llm/discover-models`、`/config/notification/test-channel`、`/config/generation-backends/smoke-test` | **必须管理员** |
+| `GET /config/schema`、`/config/setup/status`、各类 `status` / `preview` | 不额外限制（只读、无密钥外泄、不产生调用成本） |
+
+后一档里的四个端点原本**没有任何角色检查**，而它们的 `use_saved_secret=True`
+会让服务端拿**已保存的**密钥去发请求 —— 普通成员若能调用，等于借用管理员的
+LLM 额度与推送通道。2026-09-14 已补齐 `_assert_admin()`。
 
 ---
 

@@ -740,15 +740,9 @@ def _apply_tenant_config(config: Config) -> Config:
     多用户模式未启用、或当前没有用户上下文时，原样返回传入的 config。
     """
     try:
-        from src.tenancy.context import current_user_id, multiuser_enabled
-        from src.tenancy.settings import apply_user_overrides
+        from src.tenancy.settings import tenant_config
 
-        if not multiuser_enabled():
-            return config
-        tenant_id = current_user_id()
-        if tenant_id is None:
-            return config
-        return apply_user_overrides(config, tenant_id)
+        return tenant_config(config)
     except Exception as exc:  # noqa: BLE001 - 配置叠加失败必须回退而不是中断分析
         logger.warning("应用用户级配置失败，回退到全局配置: %s", exc)
         return config

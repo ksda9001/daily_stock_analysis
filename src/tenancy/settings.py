@@ -57,6 +57,13 @@ class SettingSpec:
 #: 用户可覆盖的配置项白名单。
 #: 顺序即 API 返回顺序，便于前端渲染。
 USER_SETTING_SPECS: tuple = (
+    # ---- 问股 / Agent 偏好 ----
+    SettingSpec(
+        "AGENT_CONTEXT_COMPRESSION_ENABLED",
+        "agent_context_compression_enabled",
+        KIND_BOOL,
+        "上下文压缩",
+    ),
     # ---- 自选股与报告 ----
     SettingSpec("STOCK_LIST", "stock_list", KIND_CODES, "自选股列表"),
     SettingSpec("REPORT_TYPE", "report_type", KIND_STR, "报告类型"),
@@ -121,6 +128,25 @@ def get_spec(key: str) -> Optional[SettingSpec]:
 def is_supported_key(key: str) -> bool:
     normalized = (key or "").strip().upper()
     return normalized in _SPECS_BY_KEY and normalized not in _FORBIDDEN_KEYS
+
+
+#: 「用户级系统配置」：普通成员（非管理员）可以经 ``/api/v1/system/config``
+#: 读写的键。
+#:
+#: 写操作**不会**落到 ``.env``，而是写进该用户自己的 ``dsa_user_settings``，
+#: 因此不会波及其他用户 —— 这也是它敢对普通成员开放的原因。
+#:
+#: ⚠️ 这里的键必须同时出现在 :data:`USER_SETTING_SPECS` 中，否则会出现
+#: 「用户能写、但没有任何读取点会生效」的哑设置。
+USER_SCOPED_CONFIG_KEYS = frozenset({
+    "AGENT_CONTEXT_COMPRESSION_ENABLED",
+})
+
+
+def is_user_scoped_key(key: str) -> bool:
+    """该键是否属于「普通成员可自行调整」的用户级配置。"""
+    normalized = (key or "").strip().upper()
+    return normalized in USER_SCOPED_CONFIG_KEYS and is_supported_key(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +328,35 @@ def resolve_setting(key: str, tenant_id: Optional[int], default: Any = None) -> 
     return default
 
 
+def effective_config_value(key: str, tenant_id: Optional[int]) -> tuple:
+    """返回 ``(生效值, 来源)``，来源为 ``"user"`` / ``"global"`` / ``"unsupported"``。
+
+    解析顺序与 :func:`apply_user_overrides` 一致：**用户设置 → 全局 Config**。
+
+    ⚠️ 这里刻意**不读** ``os.getenv`` —— 真正被运行时代码消费的是 ``Config``
+    实例；``.env`` 改动后 ``os.environ`` 未必同步（上游走的是 ``Config`` 单例
+    重载），用环境变量判断「全局值」会与真实行为对不上。
+    """
+    spec = get_spec(key)
+    if spec is None:
+        return None, "unsupported"
+
+    if tenant_id is not None:
+        raw = load_user_settings(tenant_id).get(spec.env_key)
+        if raw not in (None, ""):
+            decoded = decode_value(spec, raw)
+            if decoded not in (None, "", []):
+                return decoded, "user"
+
+    try:
+        from src.config import get_config
+
+        return getattr(get_config(), spec.config_attr, None), "global"
+    except Exception as exc:  # noqa: BLE001 - 读全局配置失败不应让接口整体 500
+        logger.warning("[tenancy] cannot read global value for %s: %s", key, exc)
+        return None, "global"
+
+
 # ---------------------------------------------------------------------------
 # 应用到 Config
 # ---------------------------------------------------------------------------
@@ -367,6 +422,30 @@ def apply_user_overrides(config, tenant_id: Optional[int]):
     return effective
 
 
+def tenant_config(config=None):
+    """返回叠加了**当前请求用户**设置的 ``Config`` 副本。
+
+    没有多用户上下文（未启用多用户 / 匿名请求 / 后台任务线程）时原样返回
+    传入的 ``config``，行为与改动前完全一致。
+
+    ⚠️ 必须在**有 contextvar 的线程**里调用（例如 FastAPI 的请求处理函数）。
+    把结果传给线程池即可，不要在 worker 线程里再调一次 —— ``contextvars``
+    不跨线程，那里拿不到当前用户。
+    """
+    from src.tenancy.context import current_user_id, multiuser_enabled
+
+    if config is None:
+        from src.config import get_config
+
+        config = get_config()
+    if not multiuser_enabled():
+        return config
+    tenant_id = current_user_id()
+    if tenant_id is None:
+        return config
+    return apply_user_overrides(config, tenant_id)
+
+
 def effective_stock_list(tenant_id: Optional[int]) -> Optional[List[str]]:
     """返回该用户的自选股列表；未配置时返回 ``None`` 以表示「沿用全局」。"""
     from src.tenancy.context import multiuser_enabled
@@ -385,17 +464,45 @@ def effective_stock_list(tenant_id: Optional[int]) -> Optional[List[str]]:
 
 
 def public_settings_view(tenant_id: int) -> Dict[str, Any]:
-    """构造给前端 / API 的配置视图（敏感项掩码）。"""
+    """构造给前端 / API 的配置视图（敏感项掩码）。
+
+    每个键返回：
+
+    * ``value`` —— **用户自己设的**原始值（未设则为 ``None``）；
+    * ``effective_value`` —— 真正会生效的值（用户值 → 全局值），已掩码；
+    * ``source`` —— ``"user"`` 或 ``"global"``，标明生效值来自哪一侧。
+
+    区分「自己设的」与「真正生效的」很关键：用户没设过时，``value`` 是
+    ``None``，但 ``effective_value`` 会回落到全局配置 —— 前端要显示的是后者，
+    否则会把「沿用全局的 true」显示成「未启用」。
+    """
     raw = load_user_settings(tenant_id)
+    try:
+        from src.config import get_config
+
+        global_config = get_config()
+    except Exception as exc:  # noqa: BLE001 - 视图构造失败不应让接口整体 500
+        logger.warning("[tenancy] cannot read global config for settings view: %s", exc)
+        global_config = None
+
     view: Dict[str, Any] = {}
     for spec in USER_SETTING_SPECS:
         value = raw.get(spec.env_key)
+        own = decode_value(spec, value) if value not in (None, "") else None
+        if own not in (None, "", []):
+            effective, source = own, "user"
+        else:
+            effective, source = getattr(global_config, spec.config_attr, None), "global"
         view[spec.env_key] = {
             "label": spec.label,
             "kind": spec.kind,
             "secret": spec.secret,
             "configured": bool(value),
             "value": mask_value(spec, value),
+            "effective_value": mask_value(
+                spec, None if effective is None else encode_value(spec, effective)
+            ),
+            "source": source,
         }
     return view
 

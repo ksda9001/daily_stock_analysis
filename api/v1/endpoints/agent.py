@@ -65,6 +65,24 @@ class ChatRequest(BaseModel):
         return self.skills
 
 
+def _request_config():
+    """返回当前请求应使用的 ``Config``。
+
+    多用户模式下叠加**当前用户**的设置（上下文压缩、Agent 模式……），
+    没有用户上下文时原样返回全局配置 —— 与改动前行为一致。
+
+    ⚠️ 必须在**请求处理线程**里调用：``contextvars`` 不跨线程，worker 线程里
+    拿不到当前用户。所以先在处理函数里解析好，再把结果交给线程池。
+    """
+    try:
+        from src.tenancy.settings import tenant_config
+
+        return tenant_config(get_config())
+    except Exception as exc:  # noqa: BLE001 - 叠加失败必须回退，不能中断问股
+        logger.warning("Failed to apply per-user config for agent chat: %s", exc)
+        return get_config()
+
+
 def _build_agent_chat_context(request: ChatRequest, config, skills: Optional[List[str]]) -> Dict[str, Any]:
     """Build the shared context contract for regular and streaming Agent Chat."""
     context = dict(request.context or {})
@@ -118,7 +136,7 @@ class AgentModelsResponse(BaseModel):
 @router.get("/models", response_model=AgentModelsResponse)
 async def get_agent_models():
     """Get configured Agent model deployments for frontend selection."""
-    config = get_config()
+    config = _request_config()
     from src.agent.agent_backend import AgentBackendConfigError, resolve_agent_backend_id
 
     try:
@@ -135,7 +153,7 @@ async def get_agent_models():
 @router.get("/status", response_model=AgentBackendStatusResponse)
 async def get_agent_status():
     """Return the current effective Chat backend status for the Chat page."""
-    payload = await asyncio.to_thread(_get_agent_chat_status, get_config())
+    payload = await asyncio.to_thread(_get_agent_chat_status, _request_config())
     return _agent_status_response(payload)
 
 
@@ -182,13 +200,13 @@ async def get_skills():
     """
     Get available agent strategy skills.
     """
-    return _build_skills_response(get_config())
+    return _build_skills_response(_request_config())
 
 
 @router.get("/strategies", response_model=StrategiesResponse, include_in_schema=False)
 async def get_strategies():
     """Compatibility alias for legacy clients."""
-    payload = _build_skills_response(get_config())
+    payload = _build_skills_response(_request_config())
     return StrategiesResponse(
         strategies=payload.skills,
         default_strategy_id=payload.default_skill_id,
@@ -206,7 +224,7 @@ async def agent_chat(
     events and request cancellation. The default LiteLLM Agent keeps this
     endpoint's existing behavior.
     """
-    config = get_config()
+    config = _request_config()
     backend_id = _select_agent_chat_backend(config)
     if backend_id == "codex_app_server":
         raise HTTPException(
@@ -417,7 +435,7 @@ async def agent_research(request: ResearchRequest):
 
     Similar to the ``/research`` bot command but exposed as a REST endpoint.
     """
-    config = get_config()
+    config = _request_config()
     if not config.is_agent_available():
         raise HTTPException(status_code=400, detail="Agent mode is not enabled")
 
@@ -493,7 +511,7 @@ async def agent_chat_stream(
       - done: analysis complete, contains 'content' and 'success'
       - error: error occurred, contains 'message'
     """
-    config = get_config()
+    config = _request_config()
     backend_id = _select_agent_chat_backend(config)
 
     session_id = request.session_id or str(uuid.uuid4())
