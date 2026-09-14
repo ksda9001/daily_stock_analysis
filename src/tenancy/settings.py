@@ -68,6 +68,12 @@ USER_SETTING_SPECS: tuple = (
     SettingSpec("STOCK_LIST", "stock_list", KIND_CODES, "自选股列表"),
     SettingSpec("REPORT_TYPE", "report_type", KIND_STR, "报告类型"),
     SettingSpec("AGENT_MODE", "agent_mode", KIND_BOOL, "Agent 模式"),
+    # ---- 行情推送（大盘 + 自选股）----
+    # 这两个键刻意**不**放进 _FORBIDDEN_KEYS：它们是纯业务偏好，且用户必须
+    # 能自己关掉推送、改推送时刻。注意不要和 SCHEDULE_* 混为一谈 ——
+    # SCHEDULE_* 控制的是「完整分析」的调度，属于平台行为，继续禁止用户改。
+    SettingSpec("PUSH_ENABLED", "push_enabled", KIND_BOOL, "行情推送"),
+    SettingSpec("PUSH_TIMES", "push_times", KIND_TIMES, "推送时间"),
     # ---- 通知：企业微信 / 钉钉 / 飞书 ----
     SettingSpec("WECHAT_WEBHOOK_URL", "wechat_webhook_url", KIND_STR, "企业微信机器人", secret=True),
     SettingSpec("DINGTALK_WEBHOOK_URL", "dingtalk_webhook_url", KIND_STR, "钉钉机器人", secret=True),
@@ -140,6 +146,10 @@ def is_supported_key(key: str) -> bool:
 #: 「用户能写、但没有任何读取点会生效」的哑设置。
 USER_SCOPED_CONFIG_KEYS = frozenset({
     "AGENT_CONTEXT_COMPRESSION_ENABLED",
+    # 推送开关与时刻：必须让普通成员能自己改 —— 「取消推送」和「改推送时间」
+    # 是用户级需求，且改动只落该用户自己的 dsa_user_settings，不碰 .env。
+    "PUSH_ENABLED",
+    "PUSH_TIMES",
 })
 
 
@@ -461,6 +471,84 @@ def effective_stock_list(tenant_id: Optional[int]) -> Optional[List[str]]:
     spec = get_spec("STOCK_LIST")
     decoded = decode_value(spec, raw)
     return decoded if decoded is not None else []
+
+
+def effective_push_enabled(tenant_id: Optional[int]) -> bool:
+    """推送开关的生效值：用户设置 → 全局 Config → 默认 ``True``。"""
+    value, _source = effective_config_value("PUSH_ENABLED", tenant_id)
+    if value is None:
+        return True
+    return bool(value)
+
+
+def effective_push_times(tenant_id: Optional[int]) -> List[str]:
+    """推送时刻的生效值：用户设置 → 全局 Config → :data:`DEFAULT_PUSH_TIMES`。
+
+    返回值一定经过 :func:`normalize_schedule_times`，因此可以放心当成
+    「已排序、去重、格式合法」的 ``HH:MM`` 列表使用。
+    """
+    from src.scheduler import DEFAULT_PUSH_TIMES, normalize_schedule_times
+
+    value, _source = effective_config_value("PUSH_TIMES", tenant_id)
+    if not value:
+        value = list(DEFAULT_PUSH_TIMES)
+    if isinstance(value, str):
+        value = [item for item in value.split(",") if item.strip()]
+    return normalize_schedule_times(list(value), fallback_time=DEFAULT_PUSH_TIMES[0])
+
+
+#: 内部状态键的统一前缀。
+#: 这些键**不在** :data:`USER_SETTING_SPECS` 白名单里，因此不会出现在
+#: ``/settings`` 响应体中，也不会被用户的写请求碰到。
+INTERNAL_KEY_PREFIX = "__"
+
+
+def read_internal_setting(tenant_id: Optional[int], key: str) -> Optional[str]:
+    """读取一个内部状态键（如推送去重标记）。不存在时返回 ``None``。"""
+    if tenant_id is None:
+        return None
+    normalized = (key or "").strip().upper()
+    if not normalized:
+        return None
+    return load_user_settings(int(tenant_id)).get(normalized)
+
+
+def write_internal_setting(tenant_id: int, key: str, value: Optional[str]) -> None:
+    """写入（或删除）一个内部状态键。
+
+    ⚠️ 这条路径**绕过** :data:`_FORBIDDEN_KEYS` 与白名单校验，因此只允许
+    平台自身使用（推送去重）。键名强制以 ``__`` 开头，防止把用户可写键
+    误塞进来。``value`` 为 ``None`` 表示删除该键。
+    """
+    normalized = (key or "").strip().upper()
+    if not normalized.startswith(INTERNAL_KEY_PREFIX):
+        raise ValueError(
+            f"internal setting key must start with {INTERNAL_KEY_PREFIX!r}: {normalized!r}"
+        )
+    if tenant_id is None:
+        raise ValueError("tenant_id is required for internal settings")
+
+    from src.storage import get_db
+
+    with get_db().session_scope() as session:
+        row = (
+            session.query(TenantUserSetting)
+            .filter(
+                TenantUserSetting.tenant_id == int(tenant_id),
+                TenantUserSetting.key == normalized,
+            )
+            .one_or_none()
+        )
+        if value is None:
+            if row is not None:
+                session.delete(row)
+            return
+        if row is None:
+            session.add(
+                TenantUserSetting(tenant_id=int(tenant_id), key=normalized, value=str(value))
+            )
+        else:
+            row.value = str(value)
 
 
 def public_settings_view(tenant_id: int) -> Dict[str, Any]:

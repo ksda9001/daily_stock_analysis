@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from src.tenancy import service
+from src.tenancy import push as push_service
 from src.tenancy.context import (
     Principal,
     current_principal,
@@ -68,6 +69,30 @@ def require_admin() -> Principal:
     if not principal.is_admin:
         raise _forbidden("需要管理员权限")
     return principal
+
+
+def require_push_service() -> Principal:
+    """要求「推送服务」身份：管理员，或数据库中标记为系统账号的调用者。
+
+    这个守卫存在的原因：``POST /push/digest`` 会**按入参指定的收件人**返回
+    数据，也就是说它能读到别人的自选股。因此绝不能对普通成员开放。
+
+    判据刻意**不用角色名白名单** —— 角色是管理员可以随时改的，把服务账号
+    的权限绑在角色上，等于让一次「改角色」的操作悄悄扩大了数据可见范围。
+    改用 ``is_system``：它只在建号时设置，普通成员拿不到，也不会被日常
+    运维动作改动。
+    """
+    principal = require_principal()
+    if principal.is_admin:
+        return principal
+    try:
+        user = service.get_user(principal.user_id)
+    except Exception as exc:  # noqa: BLE001 - 查询失败按「无权」处理，不放行
+        logger.warning("[tenancy] cannot verify push-service identity: %s", exc)
+        raise _forbidden("需要推送服务权限")
+    if user is not None and bool(getattr(user, "is_system", False)):
+        return principal
+    raise _forbidden("需要推送服务权限")
 
 
 def _unauthorized() -> Exception:
@@ -186,6 +211,27 @@ class WeChatBindRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=128, description="Web 端注册密码")
     wechat_id: str = Field(..., min_length=1, max_length=64, description="微信唯一标识 wxid")
     wechat_nickname: Optional[str] = Field(None, max_length=64, description="微信昵称")
+
+
+class PushDigestRequest(BaseModel):
+    """「按收件人取行情推送内容」的入参。
+
+    ``wechat_id`` 与 ``tenant_id`` 二选一：CowAgent 侧天然只知道微信标识
+    （调度任务的 receiver），所以 ``wechat_id`` 是主路径；``tenant_id``
+    留给管理端调试。
+    """
+
+    wechat_id: Optional[str] = Field(
+        default=None, alias="wechatId", description="微信唯一标识，据此反查账号"
+    )
+    tenant_id: Optional[int] = Field(
+        default=None, alias="tenantId", description="直接指定账号 ID（管理端调试用）"
+    )
+    force: bool = Field(
+        default=False, description="跳过到点与交易日判定，仅用于联调"
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +685,69 @@ async def delete_watchlist_item(
         return _watchlist_error(exc)
     logger.info("[tenancy] user %s 移除自选 %s", principal.username, result["removed"])
     return {"ok": True, "user_id": principal.user_id, **result}
+
+
+# ---------------------------------------------------------------------------
+# 行情推送（大盘 + 自选股）
+#
+# 给 CowAgent 的定时任务用。调用方（调度任务）只知道「收件人」，也就是微信
+# 标识，不知道 tenant_id，所以反查放在这里。
+#
+# 时间表（PUSH_ENABLED / PUSH_TIMES）存在各用户自己的 dsa_user_settings 里，
+# 于是「取消推送」和「改推送时间」都只改一处 —— CowAgent 侧的任务不需要重建，
+# 也就没有跨服务同步。任务只需要定期问一句「现在该推吗」。
+#
+# ⚠️ 这是**能读到他人数据**的接口（按入参指定收件人），所以守卫用
+# require_push_service 而不是 require_principal。普通成员改自己的推送偏好
+# 走的是 /settings，不经过这里。
+# ---------------------------------------------------------------------------
+
+@router.post("/push/digest", summary="组装某收件人的行情推送（推送服务专用）")
+async def build_push_digest(
+    payload: PushDigestRequest,
+    _: Principal = Depends(require_push_service),
+) -> Any:
+    """返回 ``skip=True`` 是**正常**结果（一天里绝大多数轮询都如此）。
+
+    调用方应原样转达 ``reason``，不要改写成「推送失败」—— ``not_due`` 与
+    ``already_sent`` 都表示链路健康。
+    """
+    target_id: Optional[int] = payload.tenant_id
+
+    if target_id is None:
+        wx_id = (payload.wechat_id or "").strip()
+        if not wx_id:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "missing_target",
+                    "message": "必须提供 wechat_id 或 tenant_id 之一",
+                },
+            )
+        bound = service.get_user_by_wechat_id(wx_id)
+        if bound is None:
+            # 尚未绑定账号的微信收不到推送。这是「还没建立会话」，不是故障。
+            return {
+                "ok": True,
+                "skip": True,
+                "reason": "unbound_recipient",
+                "wechat_id": wx_id,
+                "message": "该微信尚未绑定账号，跳过",
+            }
+        target_id = bound.id
+        username = bound.username
+    else:
+        target = service.get_user(int(target_id))
+        if target is None:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "user_not_found", "message": "账号不存在"},
+            )
+        username = target.username
+
+    result = push_service.build_user_digest(int(target_id), force=payload.force)
+    return {"username": username, **result}
 
 
 # ---------------------------------------------------------------------------

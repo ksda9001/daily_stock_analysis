@@ -276,6 +276,35 @@ def replace_watchlist(stock_codes: List[str]) -> str:
     return _call(tools.replace_watchlist, stock_codes=stock_codes)
 
 
+@server.tool()
+def push_digest(
+    wechat_id: str = "",
+    tenant_id: Optional[int] = None,
+    force: bool = False,
+) -> str:
+    """组装某个收件人的「大盘 + 自选股」行情简报，用于定时推送。
+
+    与其它工具不同，这个工具读的是**入参指定账号**的数据，而不是当前 Token
+    的账号 —— 定时任务只知道要发给哪个微信会话。因此它只对管理员与系统服务
+    账号开放。
+
+    :param wechat_id: 收件人的微信唯一标识（CowAgent 调度任务的 receiver）
+    :param tenant_id: 直接指定账号 ID，仅管理端调试用；与 wechat_id 二选一
+    :param force: 跳过「到点/交易日」判定直接取数，仅联调用
+
+    返回里的 ``skip=True`` 表示本次不推，``reason`` 说明原因（not_due /
+    already_sent / non_trading_day / missed_window / no_data / disabled /
+    unbound_recipient）—— **这些都是正常状态，不要当成错误上报**。
+    只有 ``skip=False`` 时才应把 ``text`` **原样**投递给收件人。
+    """
+    return _call(
+        tools.push_digest,
+        wechat_id=wechat_id,
+        tenant_id=tenant_id,
+        force=force,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. 选股
 # ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ from src.llm.hermes import (
     route_deployment_origins,
     route_has_hermes,
 )
-from src.scheduler import normalize_schedule_times
+from src.scheduler import DEFAULT_PUSH_TIMES, normalize_schedule_times
 from src.utils.market_review_region import normalize_market_review_region_lenient
 
 logger = logging.getLogger(__name__)
@@ -1202,6 +1202,12 @@ class Config:
     schedule_times: List[str] = field(default_factory=lambda: ["18:00"])
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
+    # === 行情推送（大盘 + 自选股）===
+    # 与上面的「定时分析」是两件独立的事：定时分析跑完整研报（个股约 105 秒/只），
+    # 推送只取实时行情（秒级），因此可以落在开盘后 5 分钟这种分析来不及的时刻。
+    # 由 CowAgent 侧定时调用 /api/v1/tenancy/push/digest 触发，用户可自行取消或改时间。
+    push_enabled: bool = True
+    push_times: List[str] = field(default_factory=lambda: list(DEFAULT_PUSH_TIMES))
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
     # 大盘复盘市场区域：cn(A股)、hk(港股)、us(美股)、jp(日股)、kr(韩股)、both(全部市场)
@@ -1317,6 +1323,8 @@ class Config:
             "SCHEDULE_TIME",
             "SCHEDULE_TIMES",
             "SCHEDULE_RUN_IMMEDIATELY",
+            "PUSH_ENABLED",
+            "PUSH_TIMES",
         }
     )
     _BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
@@ -2182,6 +2190,19 @@ class Config:
             ),
             schedule_run_immediately=schedule_run_immediately,
             run_immediately=legacy_run_immediately,
+            push_enabled=cls._resolve_env_value(
+                'PUSH_ENABLED',
+                default='true',
+                prefer_env_file=True,
+            ).lower() != 'false',
+            push_times=normalize_schedule_times(
+                cls._resolve_env_value(
+                    'PUSH_TIMES',
+                    default=','.join(DEFAULT_PUSH_TIMES),
+                    prefer_env_file=True,
+                ),
+                fallback_time=DEFAULT_PUSH_TIMES[0],
+            ),
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             daily_market_context_enabled=os.getenv('DAILY_MARKET_CONTEXT_ENABLED', 'true').lower() == 'true',
             market_review_region=cls._parse_market_review_region(

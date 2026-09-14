@@ -222,6 +222,23 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(self.rec.last["method"], "PUT")
         self.assertEqual(self.rec.last["body"], {"stock_codes": ["600519", "000858"]})
 
+    # -- 行情推送 ---------------------------------------------------------
+
+    def test_push_digest_targets_recipient_by_wechat_id(self):
+        """调度任务只知道收件人的微信标识，因此主路径是 wechat_id。"""
+        dsa_tools.push_digest(self.client, wechat_id="wx-abc")
+        self.assertEqual(self.rec.last["method"], "POST")
+        self.assertEqual(self.rec.last["path"], "/api/v1/tenancy/push/digest")
+        self.assertEqual(self.rec.last["body"], {"force": False, "wechat_id": "wx-abc"})
+
+    def test_push_digest_omits_empty_targets(self):
+        dsa_tools.push_digest(self.client, tenant_id=3)
+        self.assertEqual(self.rec.last["body"], {"force": False, "tenant_id": 3})
+
+    def test_push_digest_passes_force(self):
+        dsa_tools.push_digest(self.client, wechat_id="wx-abc", force=True)
+        self.assertTrue(self.rec.last["body"]["force"])
+
     # -- 分析 -------------------------------------------------------------
 
     def test_analyze_single_code_uses_stock_code_field(self):
@@ -441,6 +458,7 @@ class ServerTests(unittest.TestCase):
             "add_to_watchlist",
             "remove_from_watchlist",
             "replace_watchlist",
+            "push_digest",
             "list_screening_strategies",
             "run_screening",
             "ask_stock_question",
@@ -453,7 +471,7 @@ class ServerTests(unittest.TestCase):
             "trigger_market_review",
         }
         self.assertTrue(required.issubset(names), f"缺少工具: {required - names}")
-        self.assertEqual(len(names), 29)
+        self.assertEqual(len(names), 30)
 
     def test_tool_failure_returns_structured_json_not_exception(self):
         rec = Recorder(

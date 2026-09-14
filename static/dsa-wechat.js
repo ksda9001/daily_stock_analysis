@@ -711,6 +711,31 @@
             <strong style="color: #f59e0b;">💡 个人推送隔离保障：</strong> 在此配置您个人的专属推送通道。系统每日统一定时分析时，将<strong>仅推送您自己自选股的分析结果</strong>到您配置的通道，绝不推送到他人渠道，互不干扰、隐私安全。
           </div>
 
+          <!-- 行情推送（大盘 + 自选股）—— 决定「什么时候推」，通道决定「推到哪里」 -->
+          <div class="dsa-page-card" style="border: 1px solid rgba(59, 130, 246, 0.35);">
+            <div style="font-weight: 600; font-size: 13px; color: hsl(var(--foreground)); margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+              <span>📈 行情推送（大盘 + 自选股）</span>
+            </div>
+            <div style="font-size: 12px; color: hsl(var(--muted-foreground)); line-height: 1.6; margin-bottom: 12px;">
+              每天固定两次，把大盘指数与您自选股的<strong>实时行情</strong>推到微信。默认
+              <strong>09:35</strong> 与 <strong>15:30</strong>：前者在开盘方向确立、还来得及上午操作时送达；
+              后者在收盘价与盘后固定价格窗口都结束后送达。这与「定时分析」是两件事 ——
+              推送只取行情（秒级），不跑完整研报。关掉开关即可停止推送。
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; align-items: end;">
+              <div>
+                <label class="dsa-page-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input type="checkbox" id="dsa-push-enabled">
+                  <span>启用行情推送</span>
+                </label>
+              </div>
+              <div>
+                <label class="dsa-page-label">推送时间（24 小时制，逗号分隔）</label>
+                <input type="text" id="dsa-push-times" placeholder="09:35,15:30" class="dsa-page-input">
+              </div>
+            </div>
+          </div>
+
           <!-- Notification Channels Form -->
           <div style="display: flex; flex-direction: column; gap: 14px;">
             <!-- 1. 企业微信机器人 -->
@@ -878,6 +903,26 @@
       setVal('dsa-notify-serverchan', 'SERVERCHAN3_SENDKEY');
       setVal('dsa-notify-tg-token', 'TELEGRAM_BOT_TOKEN');
       setVal('dsa-notify-tg-chat', 'TELEGRAM_CHAT_ID');
+
+      // 行情推送：布尔与时间列表的形态跟上面的字符串字段不同，单独处理。
+      // 这里必须读 effective_value（真正生效的值）而不是 value —— 用户没设过时
+      // value 是 null，而 effective_value 会回落到全局默认。拿 value 判断会把
+      // 「沿用默认的开启」显示成「未启用」。
+      const pushEnabledInput = document.getElementById('dsa-push-enabled');
+      if (pushEnabledInput) {
+        const item = cachedNotifySettings['PUSH_ENABLED'];
+        const effective = item ? String(item.effective_value) : 'true';
+        const on = effective !== 'false';
+        pushEnabledInput.checked = on;
+        pushEnabledInput.dataset.original = on ? 'true' : 'false';
+      }
+      const pushTimesInput = document.getElementById('dsa-push-times');
+      if (pushTimesInput) {
+        const item = cachedNotifySettings['PUSH_TIMES'];
+        const effective = item ? (item.effective_value || '') : '';
+        pushTimesInput.value = effective;
+        pushTimesInput.dataset.original = effective;
+      }
     } catch (e) {
       alert('无法读取个人通知设置: ' + e);
     }
@@ -908,6 +953,30 @@
     checkAndAdd('dsa-notify-serverchan', 'SERVERCHAN3_SENDKEY');
     checkAndAdd('dsa-notify-tg-token', 'TELEGRAM_BOT_TOKEN');
     checkAndAdd('dsa-notify-tg-chat', 'TELEGRAM_CHAT_ID');
+
+    const pushEnabledInput = document.getElementById('dsa-push-enabled');
+    if (pushEnabledInput) {
+      const val = pushEnabledInput.checked ? 'true' : 'false';
+      // 与「生效值」比较，而不是与「用户自己设过的值」比较：沿用默认开启时
+      // 不动它就不该产生一次写入。
+      if (val !== (pushEnabledInput.dataset.original || 'true')) {
+        updates['PUSH_ENABLED'] = val;
+      }
+    }
+    const pushTimesInput = document.getElementById('dsa-push-times');
+    if (pushTimesInput) {
+      const val = pushTimesInput.value.trim();
+      const orig = pushTimesInput.dataset.original || '';
+      if (val && val !== orig) {
+        // 服务端对非法时间会静默回落到默认值，先在这里挡住 —— 否则用户会
+        // 以为改成功了，实际推的还是 09:35/15:30。
+        if (!/^([01]\d|2[0-3]):[0-5]\d(\s*,\s*([01]\d|2[0-3]):[0-5]\d)*$/.test(val)) {
+          alert('推送时间格式不正确。请用 24 小时制的 HH:MM，多个时间用英文逗号分隔，例如 09:35,15:30');
+          return;
+        }
+        updates['PUSH_TIMES'] = val;
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       alert('未检测到变更内容');

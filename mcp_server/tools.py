@@ -237,6 +237,44 @@ def replace_watchlist(client: DSAClient, stock_codes: List[str]) -> Dict[str, An
 
 
 # ---------------------------------------------------------------------------
+# 2b. 行情推送（大盘 + 自选股）
+# ---------------------------------------------------------------------------
+
+def push_digest(
+    client: DSAClient,
+    *,
+    wechat_id: str = "",
+    tenant_id: Optional[int] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """组装某个收件人的「大盘 + 自选股」行情简报。
+
+    ⚠️ 这是**跨账号**接口 —— 入参决定读谁的账，所以只有管理员或系统服务账号
+    能调用。CowAgent 的定时任务正是这种场景：调度任务只知道「这条要发给哪个
+    微信会话」，不知道 DSA 账号 ID，因此用 ``wechat_id`` 反查。
+
+    ``skip=True`` 是**正常**结果，不是错误：
+
+    * ``not_due`` —— 还没到推送时段（一天里绝大多数轮询都落在这里）
+    * ``already_sent`` —— 今天这个时段已经推过了（轮询去重）
+    * ``non_trading_day`` —— 今天不是交易日
+    * ``missed_window`` —— 到过点但超出时间窗（服务长时间不可用）
+    * ``no_data`` —— 行情源暂不可用
+    * ``disabled`` —— 用户自己关了推送
+    * ``unbound_recipient`` —— 该微信还没绑定账号
+
+    拿到 ``skip=False`` 时，**把 ``text`` 原样投递**，不要自己改写、总结或
+    加评论 —— 正文的排版是按推送场景排的。
+    """
+    body: Dict[str, Any] = {"force": bool(force)}
+    if wechat_id:
+        body["wechat_id"] = str(wechat_id).strip()
+    if tenant_id is not None:
+        body["tenant_id"] = int(tenant_id)
+    return client.post(f"{TENANCY}/push/digest", json_body=body)
+
+
+# ---------------------------------------------------------------------------
 # 3. 选股
 # ---------------------------------------------------------------------------
 
