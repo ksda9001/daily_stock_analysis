@@ -2,6 +2,20 @@
 
 > 特性：每天两次从 CowAgent 向用户推送「大盘 + 自选股」行情，用户可取消或改时间。
 > 设计日期 2026-09-14。**本文件是部署的唯一依据**，执行前先读「回滚」一节。
+>
+> ## ✅ 部署状态：已于 2026-09-14 18:32 执行完成
+>
+> | 步骤 | 状态 | 结果 |
+> |---|---|---|
+> | A. DSA 侧 push 端点 | ✅ 已上线 | 端点存在；`skip`/`force`/`401` 三种语义实测通过 |
+> | B1. 改构建源 | ✅ | mcp_server 与仓库 md5 一致；Dockerfile:19、compose:45 已加 |
+> | B2. 重建镜像 | ✅ | `301ba68bdfa2`（旧 `f1870f49a074` 留作回滚） |
+> | B3. 重建容器 | ✅ | 6 条 override 挂载齐备；`integration.py` md5 = `0f2d4b7a…` |
+> | C. 端到端 | ✅ | 30 工具在册含 `dsa_push_digest`；任务自动补建实测成功 |
+>
+> **实战发现（写进 §4 了）**：本次部署额外踩到两点 —— ① 容器重建用的是
+> `docker compose up -d`（compose 管理，非 `docker run`）；② 重建前先
+> `docker rename` 留档，比原方案多一个当次回滚点。
 
 ## 0. 设计要点（为什么这样做）
 
@@ -144,7 +158,18 @@ docker tag cowagent-dsa:pre-push-20260914 cowagent-dsa:latest
 # 或回退构建源：cp /root/cow-build/overrides/integration.py.orig /root/cow-build/overrides/integration.py
 ```
 
-**回滚不需要重扫微信二维码** —— 状态在两个 bind mount 里，凭据路径不含容器标识。
+**本次部署后新增的可用回滚点**（比上面更近）：
+
+| 回滚点 | 内容 |
+|---|---|
+| 镜像 `cowagent-dsa:pre-push-20260914` | 部署前版本，ID `f1870f49a074` |
+| 容器 `cowagent-prev-20260914c` | 部署前容器（rename 留档） |
+| `cowagent-prev-20260914b` | 更早一轮的容器 |
+| `/root/dsa-fork/tools/_verify_push_c.py` | C2/C3 验证脚本（可重跑） |
+| `/root/dsa-fork/tools/_verify_push_e2e.py` | C4 任务补建验证脚本（可重跑） |
+| `/tmp/_watch_push_tick.sh` 的产物 `/tmp/push_watch.log` | 到点触发观测日志 |
+
+**注意**：回滚微信侧不需要重扫二维码 —— 状态在两个 bind mount 里，凭据路径不含容器标识。本次重建后实测凭据文件时间戳（14:27）未变，通道自动恢复。
 
 ## 4. 风险与注意
 
@@ -155,3 +180,116 @@ docker tag cowagent-dsa:pre-push-20260914 cowagent-dsa:latest
 - ⚠️ 服务器**不能 push**，只能 `git fetch` + `reset --hard`
 - 安全遗留：`docker logs cowagent` 每次启动明文打印 `web_password`（与 root SSH 同口令）、
   `mcp.json` 里 `DSA_PASSWORD` 明文 —— 与本次部署无关，但应尽快轮换
+
+### 4.1 本次实战踩到的坑（2026-09-14 18:3x）
+
+1. **`cowagent` 是 compose 管理的，不是 `docker run` 建的。**
+   `docker inspect cowagent` 有完整 `com.docker.compose.*` 标签
+   （project=cowagent, config_files=/root/cowagent/docker-compose.yml）。
+   第 6 轮权限收紧时已迁回 compose。所以 B3 的正确命令是
+   `cd /root/cowagent && docker compose up -d`，**不是** `docker run`。
+2. **compose 改过 → config-hash 不符 → `up -d` 必然重建容器。**
+   实测 `compose=c6f2ff39…` vs `容器=d91d64e4…`，`up -d` 输出
+   `Container cowagent Recreate / Recreated / Started`。这是预期行为。
+3. **重建前先 `docker rename` 留档。**
+   比原方案（依赖 `cowagent-prev-20260914b`）多一个「当次前一版本」容器，
+   回滚粒度更细。本次产出 `cowagent-prev-20260914c`。
+4. **探针要按真实契约写，别猜字段。**
+   本次两处探针 bug：
+   - `push/digest` 端点要求 `wechat_id` 或 `tenant_id` 之一，漏了会返回
+     `{"ok":false,"error":"missing_target"}` —— 一度误判为端点故障
+   - `_should_suppress_delivery(content, action)` 的 `action` 是 **dict**
+     （规则在 `action["suppress"]`），不是字符串
+   - 任务定义是**嵌套**结构：`action.call_name` / `action.call_params` /
+     `action.suppress`，不是扁平字段
+5. **`ssh_run.py` 有内部超时**，长 sleep（>10 分钟）会抛 `socket.timeout`。
+   需要等待用 `nohup setsid ... &` 放后台 + 轮询产物文件。
+
+## 5. 实测验证结果（2026-09-14）
+
+### 5.1 判据对照
+
+| 判据 | 期望 | 实测 |
+|---|---|---|
+| 镜像内 `tools.py` push_digest | 1 | ✅ 1 |
+| 镜像内 `server.py` push_digest | 2 | ✅ 2 |
+| 镜像内 `integration.py` md5 | `0f2d4b7a…` | ✅ |
+| 容器使用的镜像 ID | `301ba68bdfa2` | ✅ |
+| 容器内 override 挂载数 | 6 | ✅ |
+| 容器内 `integration.py` md5 | `0f2d4b7a…` | ✅ |
+| `grep -c push_digest /opt/dsa-mcp/.../tools.py` | 1 | ✅ |
+| MCP 工具数 | 30 | ✅ `30 tool(s)` |
+| 工具含 `dsa_push_digest` | 是 | ✅ |
+| 微信通道存活 | ≥1 | ✅ 1 |
+| 原有 5 个 override 未丢 | 不变 | ✅ 全部 md5 一致 |
+
+### 5.2 DSA 端点三态（`_verify_push_c.py`）
+
+```
+无 token          → HTTP 401                                    ✅
+带 token 未到点   → {"skip": true, "reason": "missed_window",
+                     "push_times": ["09:35","15:30"]}            ✅
+force=true        → {"skip": false, "slot": "09:35",
+                     "indices": [6 个真实指数点位],
+                     "watchlist": [], "text": "**A股行情速览**…"} ✅
+```
+
+实测指数：上证 3885.33 -0.07% / 深证 13384.57 -0.64% / 创业板 3285.58 -1.10%
+/ 科创50 1528.27 -1.62% / 上证50 2861.05 -0.25% / 沪深300 4480.08 -0.67%
+
+### 5.3 抑制逻辑（`_should_suppress_delivery`）
+
+契约：`content` 为字符串，`action` 为 dict（规则在 `action["suppress"]`）。
+
+| 输入 | 期望 | 实测 |
+|---|---|---|
+| 空字符串 / None / 空白串 | 抑制 True | ✅ |
+| `{"skip": true, ...}` | 抑制 True | ✅ |
+| `{"skip": false, "indices": [...]}` | 不抑制 False | ✅ |
+| 无 skip 字段的 JSON | 不抑制 False | ✅ |
+| 非 JSON（工具报错文本） | 不抑制 False | ✅ |
+| JSON 数组（非对象） | 不抑制 False | ✅ |
+| 无 suppress 规则（空 dict） | 不抑制 False | ✅ |
+
+**接线已验证**：`integration.py:1149` 真实调用，非死代码。
+`_ensure_push_task` 同（`:1339`，挂在 `recipient_store.remember()` 之后）。
+
+### 5.4 任务自动补建（`_verify_push_e2e.py`）
+
+模拟一次微信入站消息后，`tasks.json` 实测产出：
+
+```json
+{
+  "id": "dsa-push-weixin-o9cq...@im.wechat",
+  "name": "DSA 行情推送（大盘 + 自选股）",
+  "enabled": true,
+  "schedule": {"type": "interval", "seconds": 900},
+  "action": {
+    "type": "tool_call",
+    "call_name": "dsa_push_digest",
+    "call_params": {"wechat_id": "o9cq...@im.wechat"},
+    "receiver": "o9cq...@im.wechat",
+    "channel_type": "weixin",
+    "suppress": {"json_field": "skip", "equals": true}
+  },
+  "next_run_at": "2026-09-14T18:58:02"
+}
+```
+
+日志佐证：`[Scheduler] Provisioned DSA push task dsa-push-weixin-... (channel=weixin, interval=900s)`
+**幂等已验证**：重复调用不新增任务（1 → 1）。
+
+### 5.5 回归检查
+
+| 项 | 结果 |
+|---|---|
+| `dsa-server` / `cowagent` / `searxng` | 全部 Up |
+| DSA `/api/v1/tenancy/capabilities` | 200 |
+| CowAgent 控制台 `:9899` | 303（登录跳转，正常） |
+| 公网 `https://fi.myfi.cc.cd/health` | 200 |
+| 错误日志扫描（traceback/critical/ERROR） | 无 |
+| 微信凭据文件 | 保留，时间戳未变（**无需重扫二维码**） |
+| `weixin_channel.py` 门禁补丁 | 4 处 |
+| `web_channel.py` `_resolve_channel_manager` | 9 处 |
+| 权限模式 | `read-only` / `SELF_EVOLUTION_ENABLED=False` |
+
