@@ -284,6 +284,58 @@
 
   let currentUser = null;
   let qrPollTimer = null;
+  let forcedRefreshTimer = null;
+
+  // ⚠️ 身份缓存必须能被主动作废。
+  // 上游 App 的登录/登出走的是 SPA 路由（LoginPage 用 navigate()、
+  // SidebarNav 用 logout()），**不会整页刷新**；而 checkUser() 是永久缓存，
+  // 于是切号之后菜单一直停留在上一个账号的角色上，只有手动刷浏览器才好。
+  function invalidateIdentity() {
+    currentUser = null;
+  }
+
+  function scheduleForcedRefresh(delay) {
+    if (forcedRefreshTimer) return;
+    forcedRefreshTimer = setTimeout(function () {
+      forcedRefreshTimer = null;
+      void refreshUI(true);
+    }, delay || 0);
+  }
+
+  function removeNavExtensions() {
+    document.querySelectorAll('.dsa-nav-extension-group').forEach(function (el) {
+      el.remove();
+    });
+  }
+
+  // 观察「身份变更」的可靠信号：登录/登出请求完成、以及任何 401。
+  // 用包装 fetch 而不是轮询，是为了零额外请求拿到精确时机。
+  (function observeIdentityMutations() {
+    if (typeof window.fetch !== 'function') return;
+    const nativeFetch = window.fetch.bind(window);
+    const AUTH_MUTATION_ENDPOINTS = ['/api/v1/auth/login', '/api/v1/auth/logout'];
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      const mutatesIdentity = AUTH_MUTATION_ENDPOINTS.some(function (path) {
+        return url.indexOf(path) !== -1;
+      });
+      const promise = nativeFetch(input, init);
+      promise.then(function (res) {
+        if (mutatesIdentity) {
+          invalidateIdentity();
+          scheduleForcedRefresh(0);
+          // 登录成功后 App 自己还会再拉一次 /auth/status，稍后补刷一次更稳。
+          setTimeout(function () {
+            invalidateIdentity();
+            scheduleForcedRefresh(0);
+          }, 400);
+        } else if (res && res.status === 401) {
+          invalidateIdentity();
+        }
+      }).catch(function () {});
+      return promise;
+    };
+  })();
 
   async function checkUser(forceRefresh = false) {
     if (currentUser && !forceRefresh) return currentUser;
@@ -1176,45 +1228,63 @@
   // =========================================================================
   // 3. Role-Based Navigation & Security Enforcement
   // =========================================================================
-  async function refreshUI() {
+  async function refreshUI(force = false) {
     // Check if on login page
     if (window.location.pathname.startsWith('/login')) {
+      // 已登出/未登录：撤掉注入的导航组，别把上一个账号的菜单留在页面上
+      removeNavExtensions();
       enhanceLoginPage();
       return;
     }
 
-    const user = await checkUser();
-    if (!user) return;
+    const user = await checkUser(force);
+    if (!user) {
+      removeNavExtensions();
+      return;
+    }
 
     // Reposition active overlays on each refresh
     positionCustomOverlay();
 
     // --- ENFORCE ROLE PERMISSIONS FOR NORMAL USERS ---
-    if (user.role !== 'admin') {
-      // 1. Hide "系统设置" (Settings) nav item — hide the entire NavLink wrapper
-      document.querySelectorAll('a[href="/settings"], a[href="#/settings"]').forEach(el => {
-        const navItem = el.closest('a') || el;
-        navItem.style.display = 'none';
-        const wrapper = navItem.parentElement;
-        if (wrapper && wrapper !== navItem.closest('nav')) {
-          wrapper.style.display = 'none';
-        }
-      });
-      document.querySelectorAll('nav').forEach(nav => nav.classList.add('dsa-hide-settings'));
-
-      // 2. If user navigated to /settings directly via address bar, immediately kick out
-      if (window.location.pathname.startsWith('/settings')) {
-        alert('⚠️ 权限限制：您当前为普通成员账号，无权访问底层系统设置。已为您返回首页。');
-        window.location.replace('/');
-        return;
+    // ⚠️ 这一段必须**双向**。原来只有「藏起来」没有「放出来」，于是从普通成员
+    // 切回管理员时，「系统设置」会一直是 hidden —— 表现同样是「菜单没刷新」。
+    const isAdmin = user.role === 'admin';
+    document.querySelectorAll('a[href="/settings"], a[href="#/settings"]').forEach(el => {
+      const navItem = el.closest('a') || el;
+      navItem.style.display = isAdmin ? '' : 'none';
+      const wrapper = navItem.parentElement;
+      if (wrapper && wrapper !== navItem.closest('nav')) {
+        wrapper.style.display = isAdmin ? '' : 'none';
       }
+    });
+    document.querySelectorAll('nav').forEach(nav => {
+      if (isAdmin) {
+        nav.classList.remove('dsa-hide-settings');
+      } else {
+        nav.classList.add('dsa-hide-settings');
+      }
+    });
+
+    // If a normal user navigated to /settings directly via address bar, kick out
+    if (!isAdmin && window.location.pathname.startsWith('/settings')) {
+      alert('⚠️ 权限限制：您当前为普通成员账号，无权访问底层系统设置。已为您返回首页。');
+      window.location.replace('/');
+      return;
     }
 
     // --- Inject Navigation Items (Both Desktop Sidebar and Mobile Hamburger Drawer) ---
     const allNavs = document.querySelectorAll('nav');
     allNavs.forEach(nav => {
-      if (nav.querySelector('.dsa-nav-extension-group')) {
+      const existingGroup = nav.querySelector('.dsa-nav-extension-group');
+      // 角色没变就不重建（避免每 500ms 反复销毁重建）；
+      // 角色变了必须重建 —— 否则管理员专属的「用户管理」会残留在普通成员菜单里，
+      // 或者从普通成员升到管理员后永远看不到它。
+      if (existingGroup && existingGroup.getAttribute('data-dsa-role') === user.role) {
         return;
+      }
+      if (existingGroup) {
+        existingGroup.remove();
       }
 
       const isInsideDrawer = Boolean(
@@ -1226,6 +1296,7 @@
 
       const sidebarGroup = document.createElement('div');
       sidebarGroup.className = 'dsa-nav-extension-group';
+      sidebarGroup.setAttribute('data-dsa-role', user.role);
       sidebarGroup.style.display = 'flex';
       sidebarGroup.style.flexDirection = 'column';
       sidebarGroup.style.gap = '6px';
@@ -1297,8 +1368,28 @@
     });
   }
 
+  // --- SPA 路由变化 / 回到前台：立即按当前身份重算菜单 ---
+  // 登录成功后 LoginPage 用 navigate() 切路由、退出登录后跳 /login，
+  // 都不重载页面，所以必须自己捕捉这些时机。
+  (function hookSpaNavigation() {
+    ['pushState', 'replaceState'].forEach(function (name) {
+      const original = window.history && window.history[name];
+      if (typeof original !== 'function') return;
+      window.history[name] = function () {
+        const result = original.apply(this, arguments);
+        scheduleForcedRefresh(0);
+        return result;
+      };
+    });
+    window.addEventListener('popstate', function () { scheduleForcedRefresh(0); });
+    window.addEventListener('hashchange', function () { scheduleForcedRefresh(0); });
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) scheduleForcedRefresh(0);
+    });
+  })();
+
   // Periodic DOM check & permission enforcement
-  setInterval(refreshUI, 500);
+  setInterval(function () { void refreshUI(false); }, 500);
 
   // Instant reactivity: hamburger button clicks and drawer opening
   document.addEventListener('click', function(e) {
