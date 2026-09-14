@@ -173,14 +173,17 @@
          · body 的直接子节点里确实多了
            div.fixed.inset-0.z-50.flex.items-center.justify-center.bg-black/60，
            文本含 "Log out of the current session?"，z=50、opacity=1、可见；
-         · 抽屉（Drawer 第 68 行）与 ConfirmDialog（第 40 行）**都是 z-50**，
-           打平后由绘制顺序决定胜负，结果抽屉赢了。
+         · 移动端抽屉是 Shell.tsx:81 传进去的 zIndex=90
+           （⚠️ Drawer.tsx:28 的**默认值**是 50，但调用处覆盖成了 90 ——
+            只读组件默认参数会看错），ConfirmDialog 是 z-50，
+           **50 < 90，确认框必然被抽屉盖住**。
        为什么桌面端没这个问题：桌面走 <aside>（无遮挡），弹窗只要能盖住页面
-       就行；只有移动端「抽屉本身也是 z-50 全屏浮层」才会发生冲突。
+       就行；只有移动端「抽屉本身是高 z-index 全屏浮层」才会发生冲突。
 
-       修法：把这个 floating 确认层提到抽屉之上。选择器用它的特征类组合
+       修法：把这个 floating 确认层提到抽屉（z=90）之上。选择器用它的特征类组合
        （ConfirmDialog 没有 role 属性，且是唯一同时带 z-50 + bg-black/60 +
-       backdrop-blur-sm 的 fixed 全屏层），并限定在移动端断点，桌面端不动。 */
+       backdrop-blur-sm 的 fixed 全屏层），并限定在移动端断点，桌面端不动。
+       ⚠️ 改抽屉 zIndex 的人注意：本规则硬编码 200，抽屉若超过 200 会再次失效。 */
     @media (max-width: 1023px) {
       body > div.fixed.inset-0.z-50.items-center.justify-center {
         z-index: 200 !important;
