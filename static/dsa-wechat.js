@@ -285,6 +285,9 @@
   let currentUser = null;
   let qrPollTimer = null;
   let forcedRefreshTimer = null;
+  // 微信**通道**是否在线（区别于「当前用户是否已绑定」）。
+  // 在线时后端不签发二维码，按钮要切成「重新扫码」并走 force 通道。
+  let dsaQrOnline = false;
 
   // ⚠️ 身份缓存必须能被主动作废。
   // 上游 App 的登录/登出走的是 SPA 路由（LoginPage 用 navigate()、
@@ -580,7 +583,7 @@
             </div>
             <div style="margin-top: 14px; display: flex; align-items: center; gap: 8px;">
               <span id="dsa-qr-status" class="dsa-status-badge dsa-status-wait">⏳ 等待微信扫码...</span>
-              <button onclick="window.dsaRefreshQr()" class="dsa-btn-secondary">刷新二维码</button>
+              <button id="dsa-qr-refresh-btn" onclick="window.dsaRefreshQr()" class="dsa-btn-secondary">刷新二维码</button>
             </div>
           </div>
 
@@ -1052,7 +1055,33 @@
     }
   };
 
+  // 统一的按钮外观切换：在线时提示这是「换号」操作，离线时是普通刷新。
+  function setQrRefreshBtnMode(online) {
+    const btn = document.getElementById('dsa-qr-refresh-btn');
+    if (!btn) return;
+    if (online) {
+      btn.textContent = '重新扫码（会断开当前会话）';
+      btn.title = '当前微信通道已在线，重新扫码会断开正在使用的微信号';
+    } else {
+      btn.textContent = '刷新二维码';
+      btn.title = '重新获取一次二维码';
+    }
+  }
+
   window.dsaRefreshQr = function() {
+    // 通道在线时后端不签发二维码（扫新码会顶掉正在用的会话）。
+    // 用户显式点击才走 force 通道，且必须先确认他知道后果。
+    if (dsaQrOnline) {
+      const ok = confirm(
+        '重新扫码将断开当前微信会话：\n\n' +
+        '· 当前微信号将立即无法继续接收投研研报；\n' +
+        '· 需要用新微信号重新扫码，并在微信里发送一条消息激活推送。\n\n' +
+        '确定要继续吗？'
+      );
+      if (!ok) return;
+      fetchAndRenderQr({ force: true });
+      return;
+    }
     fetchAndRenderQr();
   };
 
@@ -1064,6 +1093,8 @@
         alert('微信解绑成功');
         await checkUser(true);
         await updateMeStatus();
+        // 注意：解绑只清掉「绑定关系」，微信**通道**通常仍在线（机器人还能收发消息）。
+        // 所以这里会渲染成「通道已在线」，并把按钮切成「重新扫码」—— 想换微信号请点它。
         fetchAndRenderQr();
       } else {
         alert('解绑失败');
@@ -1219,27 +1250,38 @@
     }
   }
 
-  async function fetchAndRenderQr() {
+  async function fetchAndRenderQr(opts = {}) {
     const qrContainer = document.getElementById('dsa-qr-container');
     const qrStatusEl = document.getElementById('dsa-qr-status');
     stopQrPolling();
 
     qrContainer.innerHTML = '<span style="color: #666; font-size: 12px;">正在生成微信二维码...</span>';
     qrStatusEl.className = 'dsa-status-badge dsa-status-wait';
-    qrStatusEl.textContent = '⏳ 获取中...';
+    qrStatusEl.textContent = opts.force ? '⏳ 正在断开当前会话并生成新码...' : '⏳ 获取中...';
 
     try {
-      const res = await fetch('/api/v1/tenancy/wechat/qrlogin');
+      // 两种意图用不同 HTTP 语义表达：
+      //   「只是想看」   -> GET，无参，后端保留「在线就不签发」的短路
+      //   「我要重新扫码」-> POST action=refresh + force=1，后端据此绕过短路签发新码
+      const res = opts.force
+        ? await fetch('/api/v1/tenancy/wechat/qrlogin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'refresh', force: 1 }),
+          })
+        : await fetch('/api/v1/tenancy/wechat/qrlogin');
       if (!res.ok) throw new Error('二维码获取失败');
       const data = await res.json();
 
       // 通道可能已经在线。这种情况下后端**不再签发二维码** —— 因为让用户扫一个新码
       // 会顶掉他正在用的那个会话（errcode -14），正是「扫码成功却一直绑不上」的成因。
-      // 这里直接显示「已连接」，并且不要开始轮询（没有码可扫）。
+      // 这里直接显示「已连接」，把按钮切成「重新扫码」，并且不要开始轮询（没有码可扫）。
       if (data.logged_in) {
         qrContainer.innerHTML = '<span style="color: #10b981; font-size: 13px; font-weight: 600;">✅ 微信通道已在线</span>';
         qrStatusEl.className = 'dsa-status-badge dsa-status-confirmed';
         qrStatusEl.textContent = '✅ 微信通道已连接';
+        dsaQrOnline = true;
+        setQrRefreshBtnMode(true);
         updateMeStatus();
         return;
       }
@@ -1247,6 +1289,9 @@
       if (data.qr_image) {
         qrContainer.innerHTML = `<img src="${data.qr_image}" style="width: 100%; height: 100%; object-fit: contain; padding: 4px;" alt="WeChat QR">`;
         qrStatusEl.textContent = '⏳ 等待微信扫码...';
+        // 已经拿到新码，说明通道不再被短路面具遮蔽；等扫码确认后再由轮询改回在线态。
+        dsaQrOnline = false;
+        setQrRefreshBtnMode(false);
         startQrPolling();
       } else {
         qrContainer.innerHTML = '<span style="color: #ef4444; font-size: 12px;">生成失败，请点击刷新</span>';
@@ -1277,11 +1322,15 @@
           } else if (st === 'confirmed') {
             qrStatusEl.className = 'dsa-status-badge dsa-status-confirmed';
             qrStatusEl.textContent = '✅ 微信通道已连接';
+            dsaQrOnline = true;
+            setQrRefreshBtnMode(true);
             stopQrPolling();
             updateMeStatus();
           } else if (st === 'expired') {
             qrStatusEl.className = 'dsa-status-badge dsa-status-expired';
             qrStatusEl.textContent = '⚠️ 二维码已失效（请刷新）';
+            dsaQrOnline = false;
+            setQrRefreshBtnMode(false);
             stopQrPolling();
           }
         }
