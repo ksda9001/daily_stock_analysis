@@ -1164,6 +1164,17 @@
       if (!res.ok) throw new Error('二维码获取失败');
       const data = await res.json();
 
+      // 通道可能已经在线。这种情况下后端**不再签发二维码** —— 因为让用户扫一个新码
+      // 会顶掉他正在用的那个会话（errcode -14），正是「扫码成功却一直绑不上」的成因。
+      // 这里直接显示「已连接」，并且不要开始轮询（没有码可扫）。
+      if (data.logged_in) {
+        qrContainer.innerHTML = '<span style="color: #10b981; font-size: 13px; font-weight: 600;">✅ 微信通道已在线</span>';
+        qrStatusEl.className = 'dsa-status-badge dsa-status-confirmed';
+        qrStatusEl.textContent = '✅ 微信通道已连接';
+        updateMeStatus();
+        return;
+      }
+
       if (data.qr_image) {
         qrContainer.innerHTML = `<img src="${data.qr_image}" style="width: 100%; height: 100%; object-fit: contain; padding: 4px;" alt="WeChat QR">`;
         qrStatusEl.textContent = '⏳ 等待微信扫码...';
