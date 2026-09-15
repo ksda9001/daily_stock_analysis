@@ -3786,7 +3786,24 @@ class SystemConfigService:
         )
 
     def _build_setup_stock_list_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:
-        stocks = split_stock_list(effective_map.get("STOCK_LIST") or "")
+        """自选股检查项。
+
+        ⚠️ **多租户下必须看「当前用户自己的自选」，而不是全局 ``.env``。**
+
+        背景：用户级自选存在 ``dsa_user_settings``（按 tenant 一行），而全局
+        ``STOCK_LIST`` 是进程级基础设施配置。两者处于不同存储。如果这里只读
+        全局值，就会恒定判定「未配置」——用户明明在首页加满了自选，仍然被
+        告知「还缺少 自选股」。这正是 2026-09-15 用户反馈的问题。
+
+        刻意**不**把用户自选同步写进全局 ``.env`` 来消除该提示：那会让全局值
+        变成「所有租户股票的并集」，任何读到全局的路径都会跨租户泄漏
+        （详见交接文档 §12.2）。正确做法是把**判定口径**对齐到用户自己的数据。
+
+        口径分派：
+        - 多租户 + 有用户上下文 → 读该用户的自选；
+        - 单用户模式 / 无用户上下文（调度线程等）→ 保持读全局，行为不变。
+        """
+        stocks = self._resolve_setup_stock_list(effective_map)
         if stocks:
             return self._setup_check(
                 "stock_list",
@@ -3805,6 +3822,38 @@ class SystemConfigService:
             "当前 STOCK_LIST 为空。",
             "请至少添加 1 只股票用于首次试跑。",
         )
+
+    def _resolve_setup_stock_list(self, effective_map: Dict[str, str]) -> List[str]:
+        """解析「用于判定自选股是否已配置」的列表。
+
+        多租户下返回**当前用户**的自选；其余情况回退到 ``effective_map`` 里的
+        全局 ``STOCK_LIST``（保持单用户模式的既有行为）。
+
+        异常一律回退全局：状态检查是只读诊断，不应因为多租户模块的问题而
+        整体 500 —— 退化成旧行为总比页面报错好。
+        """
+        try:
+            from src.tenancy.context import current_user_id, multiuser_enabled
+
+            if not multiuser_enabled():
+                return split_stock_list(effective_map.get("STOCK_LIST") or "")
+
+            user_id = current_user_id()
+            if user_id is None:
+                # 无用户上下文（调度线程、启动自检）：全局口径是唯一可用的。
+                return split_stock_list(effective_map.get("STOCK_LIST") or "")
+
+            from src.tenancy.settings import effective_stock_list
+
+            own = effective_stock_list(user_id)
+            # ⚠️ 这里**不回退全局**：多租户下「没有个人配置」等价于「空自选」。
+            # 回退会让未配置用户看到别人的股票，并据此判定「已配置」。
+            return list(own or [])
+        except Exception as exc:  # noqa: BLE001 - 只读诊断，退化优于报错
+            logger.warning(
+                "[setup] 读取用户自选失败，本次回退全局 STOCK_LIST 口径: %s", exc
+            )
+            return split_stock_list(effective_map.get("STOCK_LIST") or "")
 
     def _build_setup_notification_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:
         configured = (

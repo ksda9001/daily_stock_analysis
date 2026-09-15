@@ -1513,6 +1513,76 @@
   // =========================================================================
   // 3. Role-Based Navigation & Security Enforcement
   // =========================================================================
+
+  // 首页「基础配置未完成」提示条：就地改写为普通用户能理解的引导。
+  //
+  // 为什么不是简单地 display:none：
+  //   这条提示对**确实没有自选**的用户是有用的（告诉他怎么开始用），
+  //   只是原文案的「去配置」按钮指向 `/settings`，而普通成员没有该页面
+  //   权限 —— 点进去是死路。所以保留提示、改写措辞、去掉无权限入口。
+  //   对已有自选的用户，后端 is_complete 已是 true，前端根本不会渲染
+  //   这条提示，本函数自然不会命中。
+  //
+  // 幂等性：每 500ms 会被 refreshUI 调用一次，所以必须在改写前判断
+  // `data-dsa-rewritten`，否则会反复重排 DOM（且可能把按钮重复删除）。
+  function rewriteSetupNotice() {
+    const ZH_TITLE = '基础配置未完成';
+    const EN_TITLE = 'Base configuration incomplete';
+    // 只处理「自选股」这一项缺失：其他必需项（LLM 等）是管理员的事，
+    // 普通用户无从下手，也不该在首页被要求处理。
+    const isStockRelated = function (t) {
+      return (t.indexOf('自选股') !== -1 && t.indexOf('最小可用分析') !== -1) ||
+             (t.indexOf('Missing') !== -1 && t.indexOf('minimal analysis') !== -1);
+    };
+
+    document.querySelectorAll('div[role="alert"]').forEach(function (alertEl) {
+      const txt = alertEl.textContent || '';
+      const titleHit = txt.indexOf(ZH_TITLE) !== -1 || txt.indexOf(EN_TITLE) !== -1;
+      if (!titleHit || !isStockRelated(txt)) {
+        return;
+      }
+      if (alertEl.getAttribute('data-dsa-rewritten') === '1') {
+        return;
+      }
+      alertEl.setAttribute('data-dsa-rewritten', '1');
+
+      const zh = txt.indexOf(ZH_TITLE) !== -1;
+
+      // 1) 改写标题：去掉「未完成」的故障语气
+      alertEl.querySelectorAll('p, div, span').forEach(function (el) {
+        if (el.children.length) return;          // 只改叶子节点
+        const t = (el.textContent || '').trim();
+        if (t === ZH_TITLE) {
+          el.textContent = '还没添加自选股';
+        } else if (t === EN_TITLE) {
+          el.textContent = 'No watchlist yet';
+        }
+      });
+
+      // 2) 改写正文：明确告诉用户「在哪加、加了会怎样」
+      alertEl.querySelectorAll('p, div, span').forEach(function (el) {
+        if (el.children.length) return;
+        const t = (el.textContent || '').trim();
+        if (isStockRelated(t) && t !== ZH_TITLE && t !== EN_TITLE) {
+          el.textContent = zh
+            ? '在上方输入框添加股票代码即可开始分析，添加后会自动保存到你的账户。'
+            : 'Add a stock code in the input above to start. It is saved to your account.';
+        }
+      });
+
+      // 3) 移除「去配置」按钮：普通成员没有 `/settings` 权限，点了是死路。
+      //    按钮在文案容器**外面**（flex 布局的兄弟节点），所以要往上层找。
+      const container = alertEl.closest('.px-3.pb-2') || alertEl.parentElement;
+      const scope = container && container !== document.body ? container : alertEl;
+      scope.querySelectorAll('button, a').forEach(function (btn) {
+        const bt = (btn.textContent || '').trim();
+        if (bt === '去配置' || bt === 'Configure' || bt === 'Go to settings') {
+          btn.remove();
+        }
+      });
+    });
+  }
+
   async function refreshUI(force = false) {
     // Check if on login page
     if (window.location.pathname.startsWith('/login')) {
@@ -1531,18 +1601,20 @@
     // Reposition active overlays on each refresh
     positionCustomOverlay();
 
-    // --- 隐藏首页「基础配置未完成」黄色提示条 ---
-    document.querySelectorAll('div[role="alert"]').forEach(function(alertEl) {
-      const txt = alertEl.textContent || '';
-      if (txt.indexOf('基础配置未完成') !== -1 || txt.indexOf('Base configuration incomplete') !== -1 || (txt.indexOf('自选股') !== -1 && txt.indexOf('最小可用分析') !== -1)) {
-        const parent = alertEl.closest('.px-3.pb-2') || alertEl.parentElement;
-        if (parent && parent !== document.body) {
-          parent.style.display = 'none';
-        } else {
-          alertEl.style.display = 'none';
-        }
-      }
-    });
+    // --- 改写首页「基础配置未完成」提示条（不隐藏） ---
+    //
+    // 背景：这条告警由上游预构建产物渲染，**按用户判定** —— 有自选的用户
+    // 后端返回 is_complete=true，前端自然不显示（见 setup-status 口径修复）。
+    // 仍需处理的是「确实还没加自选」的用户：
+    //   1. 原文案带「去配置」按钮，跳 `/settings`。普通成员没有该页面权限，
+    //      点进去只会被拦或看到空页面 —— 对普通用户是死路。
+    //   2. 「基础配置未完成」的措辞像系统故障，而实际上用户只要在首页加只
+    //      股票就完事。
+    //
+    // 因此这里**把提示条改写**成面向普通用户的表述，并移除无权限的入口。
+    // 刻意不整体隐藏：未配自选的新用户需要这条引导，只是引导目标应该是
+    // 首页自选区，不是后台设置页。
+    rewriteSetupNotice();
 
     // --- ENFORCE ROLE PERMISSIONS FOR NORMAL USERS ---
     // ⚠️ 这一段必须**双向**。原来只有「藏起来」没有「放出来」，于是从普通成员

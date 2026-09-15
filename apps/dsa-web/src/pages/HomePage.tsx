@@ -6,7 +6,6 @@ import { getParsedApiError, type ParsedApiError } from '../api/error';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { historyApi } from '../api/history';
 import { agentApi, type SkillInfo } from '../api/agent';
-import { systemConfigApi } from '../api/systemConfig';
 import { ApiErrorAlert, Button, Drawer, EmptyState, InlineAlert } from '../components/common';
 import { DashboardStateBlock } from '../components/dashboard';
 import { StockAutocomplete } from '../components/StockAutocomplete';
@@ -26,7 +25,6 @@ import {
 import { useDashboardLifecycle, useHomeDashboardState } from '../hooks';
 import { useWatchlist } from '../hooks/useWatchlist';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
-import type { SetupStatusResponse } from '../types/systemConfig';
 import { normalizeReportLanguage } from '../utils/reportLanguage';
 import type {
   AnalyzeAsyncResponse,
@@ -251,7 +249,9 @@ async function getTodayAnalysisItems(dateKey: string): Promise<StockBarItem[]> {
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { language: uiLanguage, t } = useUiLanguage();
+  // 原先还解构了 language: uiLanguage，供「基础配置未完成」告警拼接缺失项
+  // 名称用；该告警已移除，此处不再需要（noUnusedLocals 会拦住未使用变量）。
+  const { t } = useUiLanguage();
   const {
     index: stockIndexItems,
     fallback: isStockIndexFallback,
@@ -351,7 +351,6 @@ const HomePage: React.FC = () => {
   }, []);
 
   useEffect(() => stopMarketReviewPolling, [stopMarketReviewPolling]);
-  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
 
   const {
     query,
@@ -450,24 +449,10 @@ const HomePage: React.FC = () => {
     document.title = t('home.pageTitle');
   }, [t]);
 
-  useEffect(() => {
-    let active = true;
-    systemConfigApi.getSetupStatus()
-      .then((status) => {
-        if (active) {
-          setSetupStatus(status);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setSetupStatus(null);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+  // 原先这里拉取 systemConfigApi.getSetupStatus()，供首页「基础配置未完成」
+  // 告警卡片使用。该卡片不再由首页渲染，这份数据也就失去了唯一的消费方，
+  // 因此整块删除（顺带省掉一次无用请求）。
+  // 设置页仍会自行拉取并展示配置状态，功能不受影响。
 
   useEffect(() => {
     let active = true;
@@ -626,16 +611,13 @@ const HomePage: React.FC = () => {
         break;
     }
   }, [closeStrategyMenu, focusStrategyItem, strategyOptions.length]);
-  const setupNeedsAction = setupStatus ? !setupStatus.isComplete : false;
-  const setupMissingLabels = useMemo(() => {
-    if (!setupStatus) {
-      return '';
-    }
-    const requiredNeedsAction = setupStatus.checks
-      .filter((check) => check.required && check.status === 'needs_action')
-      .map((check) => check.title);
-    return requiredNeedsAction.slice(0, 3).join(uiLanguage === 'en' ? ', ' : '、');
-  }, [setupStatus, uiLanguage]);
+  // 首页不再渲染「基础配置未完成」告警，相关的 setupStatus 状态、
+  // setupNeedsAction / setupMissingLabels 推导均已随之删除。
+  //
+  // ⚠️ 线上首页该提示的最终呈现由注入层 static/dsa-wechat.js 的
+  // rewriteSetupNotice() 负责：对「确实没有自选」的用户，提示条会被改写为
+  // 面向普通用户的话术并移除无权限的「去配置」按钮。此处删除只影响源码，
+  // 线上跑的是上游预构建产物 —— 见交接文档 §13。
 
   const handleCompletedTaskDataRefreshStarted = useCallback((task: TaskInfo) => {
     if (task.reportType === 'market_review') {
