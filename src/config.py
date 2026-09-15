@@ -72,7 +72,12 @@ from src.llm.hermes import (
     route_deployment_origins,
     route_has_hermes,
 )
-from src.scheduler import DEFAULT_PUSH_TIMES, normalize_schedule_times
+from src.scheduler import (
+    DEFAULT_PUSH_TIMES,
+    MARKET_PUSH_TIMES_DEFAULT,
+    STOCK_PUSH_TIMES_DEFAULT,
+    normalize_schedule_times,
+)
 from src.utils.market_review_region import normalize_market_review_region_lenient
 
 logger = logging.getLogger(__name__)
@@ -1207,6 +1212,15 @@ class Config:
     # 推送只取实时行情（秒级），因此可以落在开盘后 5 分钟这种分析来不及的时刻。
     # 由 CowAgent 侧定时调用 /api/v1/tenancy/push/digest 触发，用户可自行取消或改时间。
     push_enabled: bool = True
+    # 自选股推送时刻（用户可改）。
+    stock_push_times: List[str] = field(
+        default_factory=lambda: list(STOCK_PUSH_TIMES_DEFAULT)
+    )
+    # 大盘复盘推送时刻（用户只读，平台策略）。
+    market_push_times: List[str] = field(
+        default_factory=lambda: list(MARKET_PUSH_TIMES_DEFAULT)
+    )
+    # 历史键：保留以便旧配置/旧代码继续可读，新代码读写 stock_push_times。
     push_times: List[str] = field(default_factory=lambda: list(DEFAULT_PUSH_TIMES))
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
@@ -2195,13 +2209,30 @@ class Config:
                 default='true',
                 prefer_env_file=True,
             ).lower() != 'false',
+            stock_push_times=normalize_schedule_times(
+                cls._resolve_env_value(
+                    'STOCK_PUSH_TIMES',
+                    default=','.join(STOCK_PUSH_TIMES_DEFAULT),
+                    prefer_env_file=True,
+                ),
+                fallback_time=STOCK_PUSH_TIMES_DEFAULT[0],
+            ),
+            market_push_times=normalize_schedule_times(
+                cls._resolve_env_value(
+                    'MARKET_PUSH_TIMES',
+                    default=','.join(MARKET_PUSH_TIMES_DEFAULT),
+                    prefer_env_file=True,
+                ),
+                fallback_time=MARKET_PUSH_TIMES_DEFAULT[0],
+            ),
+            # 历史键：默认跟随自选股时刻，保证旧读取点拿到的是同一份值。
             push_times=normalize_schedule_times(
                 cls._resolve_env_value(
                     'PUSH_TIMES',
-                    default=','.join(DEFAULT_PUSH_TIMES),
+                    default=','.join(STOCK_PUSH_TIMES_DEFAULT),
                     prefer_env_file=True,
                 ),
-                fallback_time=DEFAULT_PUSH_TIMES[0],
+                fallback_time=STOCK_PUSH_TIMES_DEFAULT[0],
             ),
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             daily_market_context_enabled=os.getenv('DAILY_MARKET_CONTEXT_ENABLED', 'true').lower() == 'true',

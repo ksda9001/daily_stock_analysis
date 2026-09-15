@@ -52,6 +52,9 @@ class SettingSpec:
     label: str = ""
     #: 是否属于敏感信息（对外返回时做掩码）
     secret: bool = False
+    #: 用户是否只能读。**仅供前端置灰展示**，真正的写拦截来自
+    #: :data:`USER_SCOPED_CONFIG_KEYS` —— 不要把鉴权建在这个布尔值上。
+    readonly: bool = False
 
 
 #: 用户可覆盖的配置项白名单。
@@ -73,7 +76,27 @@ USER_SETTING_SPECS: tuple = (
     # 能自己关掉推送、改推送时刻。注意不要和 SCHEDULE_* 混为一谈 ——
     # SCHEDULE_* 控制的是「完整分析」的调度，属于平台行为，继续禁止用户改。
     SettingSpec("PUSH_ENABLED", "push_enabled", KIND_BOOL, "行情推送"),
-    SettingSpec("PUSH_TIMES", "push_times", KIND_TIMES, "推送时间"),
+    # 自选股推送时刻：用户可以自由改（在 USER_SCOPED_CONFIG_KEYS 里）。
+    SettingSpec("STOCK_PUSH_TIMES", "stock_push_times", KIND_TIMES, "自选股推送时间"),
+    # 历史键：拆分前用户改的就是它，:func:`effective_push_times` 仍把它作为
+    # 自选股时刻的回退来源。保留 spec 是为了让它可读可写 —— 从白名单里摘掉
+    # 会造出「用户能写、但没有任何读取点会生效」的哑设置（见
+    # USER_SCOPED_CONFIG_KEYS 上方的警告）。
+    SettingSpec("PUSH_TIMES", "push_times", KIND_TIMES, "推送时间（旧）"),
+    # 大盘复盘时刻：**用户只读**。列在这里是为了让 /settings 的视图把它一并
+    # 返回，前端才能渲染「大盘 15:30（不可修改）」这行说明。
+    #
+    # 只读不是靠这个 spec 实现的，而是靠它**不在** USER_SCOPED_CONFIG_KEYS
+    # 里：system_config 的写接口只认那个白名单，所以对 MARKET_PUSH_TIMES 的
+    # 写请求会被拒，读请求照常（视图遍历的是 USER_SETTING_SPECS）。
+    # readonly 标记供前端置灰，不参与任何鉴权判定。
+    SettingSpec(
+        "MARKET_PUSH_TIMES",
+        "market_push_times",
+        KIND_TIMES,
+        "大盘复盘推送时间",
+        readonly=True,
+    ),
     # ---- 通知：企业微信 / 钉钉 / 飞书 ----
     SettingSpec("WECHAT_WEBHOOK_URL", "wechat_webhook_url", KIND_STR, "企业微信机器人", secret=True),
     SettingSpec("DINGTALK_WEBHOOK_URL", "dingtalk_webhook_url", KIND_STR, "钉钉机器人", secret=True),
@@ -149,7 +172,10 @@ USER_SCOPED_CONFIG_KEYS = frozenset({
     # 推送开关与时刻：必须让普通成员能自己改 —— 「取消推送」和「改推送时间」
     # 是用户级需求，且改动只落该用户自己的 dsa_user_settings，不碰 .env。
     "PUSH_ENABLED",
-    "PUSH_TIMES",
+    "PUSH_TIMES",  # 历史键：保留可写，避免旧客户端写入时被拒。
+    "STOCK_PUSH_TIMES",
+    # ⚠️ 刻意不含 MARKET_PUSH_TIMES：大盘时刻是平台策略（全租户共享一份
+    # 复盘），用户不可改。写请求会在这里被拒，读请求不受影响。
 })
 
 
@@ -482,19 +508,50 @@ def effective_push_enabled(tenant_id: Optional[int]) -> bool:
 
 
 def effective_push_times(tenant_id: Optional[int]) -> List[str]:
-    """推送时刻的生效值：用户设置 → 全局 Config → :data:`DEFAULT_PUSH_TIMES`。
+    """**自选股**推送时刻的生效值：用户设置 → 全局 Config → 默认。
 
     返回值一定经过 :func:`normalize_schedule_times`，因此可以放心当成
     「已排序、去重、格式合法」的 ``HH:MM`` 列表使用。
-    """
-    from src.scheduler import DEFAULT_PUSH_TIMES, normalize_schedule_times
 
-    value, _source = effective_config_value("PUSH_TIMES", tenant_id)
+    读 ``STOCK_PUSH_TIMES``，并兼容历史 ``PUSH_TIMES``：拆分前用户改的是
+    后者，直接不认会让既有用户的设置悄悄失效。
+    """
+    from src.scheduler import (
+        DEFAULT_PUSH_TIMES,
+        STOCK_PUSH_TIMES_DEFAULT,
+        normalize_schedule_times,
+    )
+
+    value, _source = effective_config_value("STOCK_PUSH_TIMES", tenant_id)
     if not value:
-        value = list(DEFAULT_PUSH_TIMES)
+        # 兼容旧键：拆分前用户设置写的是 PUSH_TIMES。
+        value, _source = effective_config_value("PUSH_TIMES", tenant_id)
+    if not value:
+        value = list(STOCK_PUSH_TIMES_DEFAULT)
     if isinstance(value, str):
         value = [item for item in value.split(",") if item.strip()]
-    return normalize_schedule_times(list(value), fallback_time=DEFAULT_PUSH_TIMES[0])
+    return normalize_schedule_times(
+        list(value), fallback_time=STOCK_PUSH_TIMES_DEFAULT[0]
+    )
+
+
+def effective_market_push_times(tenant_id: Optional[int] = None) -> List[str]:
+    """**大盘复盘**推送时刻的生效值：全局 Config → 默认。
+
+    刻意**不读**用户设置：大盘时刻是平台策略（全租户共享一份复盘），用户
+    改不了。``tenant_id`` 保留在签名里是为了与 :func:`effective_push_times`
+    对称，调用点不必区分两条时间线的取法。
+    """
+    from src.scheduler import MARKET_PUSH_TIMES_DEFAULT, normalize_schedule_times
+
+    value, _source = effective_config_value("MARKET_PUSH_TIMES", None)
+    if not value:
+        value = list(MARKET_PUSH_TIMES_DEFAULT)
+    if isinstance(value, str):
+        value = [item for item in value.split(",") if item.strip()]
+    return normalize_schedule_times(
+        list(value), fallback_time=MARKET_PUSH_TIMES_DEFAULT[0]
+    )
 
 
 #: 内部状态键的统一前缀。
@@ -585,6 +642,7 @@ def public_settings_view(tenant_id: int) -> Dict[str, Any]:
             "label": spec.label,
             "kind": spec.kind,
             "secret": spec.secret,
+            "readonly": spec.readonly,
             "configured": bool(value),
             "value": mask_value(spec, value),
             "effective_value": mask_value(

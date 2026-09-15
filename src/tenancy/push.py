@@ -33,6 +33,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.tenancy.settings import (
+    effective_market_push_times,
     effective_push_enabled,
     effective_push_times,
     read_internal_setting,
@@ -383,6 +384,14 @@ def fetch_watchlist_quotes(codes: List[str]) -> List[Dict[str, Any]]:
 
 #: 大盘复盘记录在 ``analysis_history`` 里的 ``code`` / ``report_type`` 约定值。
 MARKET_REVIEW_CODE = "MARKET"
+
+#: ``collect_report_text`` 的选段标记 —— 决定这次组装哪几半内容。
+#:
+#: 两条推送时间线各自需要不同的正文：大盘复盘只在收盘后有意义（数据定稿），
+#: 自选股研报则在开盘后就能看。用选段而不是「拿全量再裁掉一半」，是因为裁
+#: 字符串要靠标题匹配，而报告正文里的标题格式由渲染层决定、随时可能变。
+SECTION_MARKET = "market"
+SECTION_STOCKS = "stocks"
 MARKET_REVIEW_REPORT_TYPE = "market_review"
 
 #: 个股完整研报的 ``report_type``（``simple`` 是精简版，不用）。
@@ -480,7 +489,13 @@ def _render_record_markdown(record_id: int, scope_id: int) -> Optional[str]:
     return strip_hidden_markdown_metadata(text).strip()
 
 
-def collect_report_text(tenant_id: int, codes: List[str], now: datetime) -> str:
+def collect_report_text(
+    tenant_id: int,
+    codes: List[str],
+    now: datetime,
+    *,
+    sections: Tuple[str, ...] = (SECTION_MARKET, SECTION_STOCKS),
+) -> str:
     """收集该租户的推送正文：大盘复盘 + 各只自选股研报。
 
     组装顺序与读报习惯一致：**先大盘、后个股**。
@@ -495,33 +510,44 @@ def collect_report_text(tenant_id: int, codes: List[str], now: datetime) -> str:
     from src.tenancy.context import SHARED_TENANT_ID
 
     since = now - timedelta(hours=REPORT_MAX_AGE_HOURS)
-    sections: List[str] = []
+    parts: List[str] = []
 
     # 大盘复盘：共享内容，不按租户过滤。
-    review_id = _latest_record_id(None, MARKET_REVIEW_REPORT_TYPE, MARKET_REVIEW_CODE, since)
-    if review_id is not None:
-        review = _render_record_markdown(review_id, SHARED_TENANT_ID)
-        if review:
-            sections.append(review)
-    else:
-        logger.info("[push] tenant %s: no market review within %sh", tenant_id, REPORT_MAX_AGE_HOURS)
+    if SECTION_MARKET in sections:
+        review_id = _latest_record_id(
+            None, MARKET_REVIEW_REPORT_TYPE, MARKET_REVIEW_CODE, since
+        )
+        if review_id is not None:
+            review = _render_record_markdown(review_id, SHARED_TENANT_ID)
+            if review:
+                parts.append(review)
+        else:
+            logger.info(
+                "[push] tenant %s: no market review within %sh",
+                tenant_id,
+                REPORT_MAX_AGE_HOURS,
+            )
 
     # 个股研报：**必须**按租户过滤 —— 私有数据，跨租户可见即越权。
-    for code in codes:
-        clean = str(code or "").strip().upper()
-        if not clean:
-            continue
-        record_id = _latest_record_id(int(tenant_id), STOCK_REPORT_TYPE, clean, since)
-        if record_id is None:
-            logger.info("[push] tenant %s: no fresh report for %s", tenant_id, clean)
-            continue
-        body = _render_record_markdown(record_id, int(tenant_id))
-        if body:
-            sections.append(body)
+    if SECTION_STOCKS in sections:
+        for code in codes:
+            clean = str(code or "").strip().upper()
+            if not clean:
+                continue
+            record_id = _latest_record_id(
+                int(tenant_id), STOCK_REPORT_TYPE, clean, since
+            )
+            if record_id is None:
+                logger.info("[push] tenant %s: no fresh report for %s", tenant_id, clean)
+                continue
+            body = _render_record_markdown(record_id, int(tenant_id))
+            if body:
+                parts.append(body)
 
-    if not sections:
+    if not parts:
         return ""
-    return "\n\n---\n\n".join(sections)
+
+    return "\n\n---\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +706,12 @@ def build_user_digest(
     if not effective_push_enabled(tenant_id):
         return {**base, "skip": True, "reason": "disabled", "message": "该用户已关闭行情推送"}
 
-    times = effective_push_times(tenant_id)
+    # 两条独立时间线：自选股（用户可改）与大盘复盘（平台固定）。各自算到点
+    # 情况，再合并成「这次该推什么」——同一时刻若两边都命中，就一次推完整
+    # 两条正文，而不是发两条消息。
+    stock_times = effective_push_times(tenant_id)
+    market_times = effective_market_push_times(tenant_id)
+    times = sorted(set(stock_times) | set(market_times))
 
     if not force:
         if not is_trading_day(moment):
@@ -691,18 +722,35 @@ def build_user_digest(
                 "push_times": times,
                 "message": "今天不是 A 股交易日",
             }
-        slot, reason = due_slot(tenant_id, times, moment)
-        if slot is None:
+
+        stock_slot, _stock_reason = due_slot(tenant_id, stock_times, moment)
+        market_slot, _market_reason = due_slot(tenant_id, market_times, moment)
+
+        if stock_slot is None and market_slot is None:
+            # 两边都没到点。报告原因时以自选股为准（用户能改的就是它），
+            # 否则用户看到 already_sent 会以为是平台漏推。
             return {
                 **base,
                 "skip": True,
-                "reason": reason,
+                "reason": _stock_reason if _stock_reason != "not_due" else _market_reason,
                 "push_times": times,
-                "message": f"当前不在推送时段（{reason}）",
+                "stock_push_times": stock_times,
+                "market_push_times": market_times,
+                "message": "当前不在推送时段",
             }
-    else:
-        slot = times[0] if times else ""
+
+        slot = stock_slot or market_slot
         reason = ""
+        parts: List[str] = []
+        if market_slot is not None:
+            parts.append(SECTION_MARKET)
+        if stock_slot is not None:
+            parts.append(SECTION_STOCKS)
+    else:
+        # 手动触发：两条正文都推，便于联调时一次看全。
+        slot = (stock_times or market_times or [""])[0]
+        reason = ""
+        parts = [SECTION_MARKET, SECTION_STOCKS]
 
     indices = fetch_indices()
     stock_view = resolve_stock_list(tenant_id)
@@ -717,7 +765,9 @@ def build_user_digest(
     #
     # ⚠️ 只读 analysis_history，**不在这里跑分析**：完整分析个股约 105 秒/只，
     # 09:35 这个时段来不及。报告由 runtime_scheduler 的租户 fan-out 预先产出。
-    report_text = collect_report_text(tenant_id, codes, moment)
+    report_text = collect_report_text(
+        tenant_id, codes, moment, sections=tuple(parts)
+    )
 
     watchlist_ok = [item for item in watchlist if item.get("ok")]
     if not report_text and not indices and not watchlist_ok:
@@ -741,8 +791,14 @@ def build_user_digest(
         now=moment,
     )
 
-    if slot and not force:
-        mark_sent(tenant_id, slot, moment)
+    if not force:
+        # 只标记**本次真的推过**的时段。把两边都标上会让另一条时间线在
+        # 当天剩余时间里静默失效 —— 15:30 推完大盘顺手把自选股也标了，
+        # 用户就再也收不到自选股那条。
+        if stock_slot:
+            mark_sent(tenant_id, stock_slot, moment)
+        if market_slot:
+            mark_sent(tenant_id, market_slot, moment)
 
     logger.info(
         "[push] user %s slot=%s report=%d indices=%d watchlist=%d text_len=%d",
@@ -759,6 +815,9 @@ def build_user_digest(
         "skip": False,
         "slot": slot,
         "push_times": times,
+        "stock_push_times": stock_times,
+        "market_push_times": market_times,
+        "sections": list(parts),
         "indices": indices,
         "watchlist": watchlist,
         "stock_codes": codes,
