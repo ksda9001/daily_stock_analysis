@@ -51,7 +51,7 @@
       color: hsl(var(--foreground));
       font-weight: 500;
     }
-    aside .dsa-sidebar-item {
+    aside:has(nav) .dsa-sidebar-item {
       justify-content: center;
       /* 原生 rail 用 gap-2.5 = 10px，原来写成 8px 会差 2px */
       gap: 10px;
@@ -70,12 +70,17 @@
        "hidden lg:flex" 做响应式显隐，而 .hidden 不带 !important，
        会被 display: flex !important 压过，导致窗口缩到 lg(1024px) 以下时
        桌面侧边栏不再隐藏。只补 flex-direction（display:none 时该属性无副作用）。
+       ⚠️ 必须使用 aside:has(nav) 限定桌面侧边栏，严禁裸写 aside！
+       页面主区域也存在 <aside>（例如 HomeStockWorkspace 自选股工作区：
+       aside.home-stock-scroll-shell）。若裸写 aside > div，会把自选股
+       顶部表单强制设为 height: 100%，导致下方的自选股滚动列表（ScrollArea）
+       被挤出可视区或压成 0 高度，自选股无法显示！
        ⚠️ 本段 CSS 位于 JS 模板字面量内：注释里禁止出现反引号，否则会提前
        终止模板字符串，整个注入脚本直接语法报错。 */
-    aside {
+    aside:has(nav) {
       flex-direction: column !important;
     }
-    aside > div {
+    aside:has(nav) > div {
       overflow: hidden !important;
       display: flex !important;
       flex-direction: column !important;
@@ -83,10 +88,10 @@
       max-height: calc(100vh - 2rem) !important;
       min-height: 0 !important;
     }
-    aside > div > div:first-child {
+    aside:has(nav) > div > div:first-child {
       flex-shrink: 0 !important;
     }
-    aside nav {
+    aside:has(nav) nav {
       overflow-y: auto !important;
       overflow-x: hidden !important;
       scrollbar-width: none !important;
@@ -94,17 +99,17 @@
       flex: 1 1 0% !important;
       min-height: 0 !important;
     }
-    aside nav::-webkit-scrollbar {
+    aside:has(nav) nav::-webkit-scrollbar {
       display: none !important;
     }
     /* ⚠️ 主题/语言下拉是 nav 内部的绝对定位元素，会被 nav 的滚动容器裁掉
        （表现为下拉右侧被切、勾选图标不完整）。
        菜单打开时临时放开裁剪，让下拉能完整溢出侧边栏。 */
-    aside:has([role="menu"]) > div,
-    aside:has([role="menu"]) nav {
+    aside:has(nav):has([role="menu"]) > div,
+    aside:has(nav):has([role="menu"]) nav {
       overflow: visible !important;
     }
-    aside > div > button {
+    aside:has(nav) > div > button {
       flex-shrink: 0 !important;
       margin-top: 8px !important;
       margin-bottom: 4px !important;
@@ -191,13 +196,73 @@
     }
 
     /* Hide settings link nav-item for non-admin users */
+    /* ⚠️ 严禁使用 a[href="/settings"] ~ *！
+       因为在 SidebarNav 中，ThemeToggle 和 UiLanguageToggle 正好排在 settings
+       的后面，属于其兄弟节点。使用 ~ * 会导致普通用户界面的主题和语言切换被误隐藏！
+       此处仅隐藏 settings 链接本身。 */
     .dsa-hide-settings a[href="/settings"],
     .dsa-hide-settings a[href="#/settings"] {
       display: none !important;
     }
-    .dsa-hide-settings a[href="/settings"] ~ *,
-    .dsa-hide-settings a[href="/settings"]:has(~ *) {
+
+    /* 5. 语言切换与主题切换在各端/各角色的样式与显隐规范
+       ------------------------------------------------------------------
+       a) 语言切换按钮默认高光重置：
+          UiLanguageToggle 在侧边栏中被赋予了 itemActiveClass 高亮类，
+          导致默认呈现亮蓝色药丸形状。此处将其重置为中性无边框，与主题切换按钮对齐，
+          仅在 hover 时展示背景。
+       b) 移动端汉堡菜单（抽屉）：
+          移动端已经在右上角顶栏常驻展示了语言与主题切换按钮，因此汉堡抽屉内不显示。
+       c) PC 端桌面：
+          右上角不显示（由 lg:hidden 与媒体查询兜底隐藏），而在左侧边栏导航菜单中显示。
+       d) 普通用户：
+          修复此前误写的 a[href="/settings"] ~ * 选择器后，普通用户界面恢复显示。 */
+    nav button:has(svg.lucide-languages),
+    button[aria-label*="语言"]:not(.dsa-topbar-btn),
+    button[aria-label*="language" i]:not(.dsa-topbar-btn) {
+      background: transparent !important;
+      border-color: transparent !important;
+      color: hsl(var(--secondary-text, 224 18% 28%)) !important;
+      font-weight: 400 !important;
+    }
+    nav button:has(svg.lucide-languages):hover,
+    button[aria-label*="语言"]:not(.dsa-topbar-btn):hover,
+    button[aria-label*="language" i]:not(.dsa-topbar-btn):hover {
+      background: var(--nav-hover-bg, hsl(var(--primary, 193 100% 43%) / 0.05)) !important;
+      color: hsl(var(--foreground)) !important;
+    }
+    nav button:has(svg.lucide-languages) svg,
+    button[aria-label*="语言"]:not(.dsa-topbar-btn) svg,
+    button[aria-label*="language" i]:not(.dsa-topbar-btn) svg {
+      color: hsl(var(--secondary-text, 224 18% 28%)) !important;
+    }
+    nav button:has(svg.lucide-languages):hover svg,
+    button[aria-label*="语言"]:not(.dsa-topbar-btn):hover svg,
+    button[aria-label*="language" i]:not(.dsa-topbar-btn):hover svg {
+      color: hsl(var(--foreground)) !important;
+    }
+
+    /* 移动端汉堡菜单（抽屉）内隐藏语言与主题切换选项 */
+    [role="dialog"] nav button:has(svg.lucide-languages),
+    [role="dialog"] nav button:has(svg.lucide-sun),
+    [role="dialog"] nav button:has(svg.lucide-moon),
+    [role="dialog"] nav div:has(> button:has(svg.lucide-languages)),
+    [role="dialog"] nav div:has(> button:has(svg.lucide-sun)),
+    [role="dialog"] nav div:has(> button:has(svg.lucide-moon)),
+    .max-w-xs nav button:has(svg.lucide-languages),
+    .max-w-xs nav button:has(svg.lucide-sun),
+    .max-w-xs nav button:has(svg.lucide-moon),
+    .max-w-xs nav div:has(> button:has(svg.lucide-languages)),
+    .max-w-xs nav div:has(> button:has(svg.lucide-sun)),
+    .max-w-xs nav div:has(> button:has(svg.lucide-moon)) {
       display: none !important;
+    }
+
+    /* PC 端（>= 1024px）：右上角顶栏不显示语言与主题切换选项 */
+    @media (min-width: 1024px) {
+      .pointer-events-none.fixed.inset-x-0.top-3 .lg\\:hidden {
+        display: none !important;
+      }
     }
 
     /* 2. Full-page overlay panels: Theme-adaptive & positioned over main content area */
@@ -1135,11 +1200,12 @@
     }
   };
 
-  // 统一的按钮外观切换：在线时提示这是「换号」操作，离线时是普通刷新。
+  // 统一的按钮外观切换：在线且当前用户已绑定时提示这是「换号」操作，未绑定时一律是普通刷新。
   function setQrRefreshBtnMode(online) {
     const btn = document.getElementById('dsa-qr-refresh-btn');
     if (!btn) return;
-    if (online) {
+    const isBound = Boolean(currentUser && currentUser.wechat_bound);
+    if (online && isBound) {
       btn.textContent = '重新扫码（会断开当前会话）';
       btn.title = '当前微信通道已在线，重新扫码会断开正在使用的微信号';
     } else {
@@ -1149,9 +1215,10 @@
   }
 
   window.dsaRefreshQr = function() {
-    // 通道在线时后端不签发二维码（扫新码会顶掉正在用的会话）。
-    // 用户显式点击才走 force 通道，且必须先确认他知道后果。
-    if (dsaQrOnline) {
+    const isBound = Boolean(currentUser && currentUser.wechat_bound);
+    // 仅当用户已绑定微信且通道在线时，才弹窗提示「重新扫码将断开当前微信会话」
+    // 新用户 / 未绑定微信的用户，点击直接刷新二维码，无需弹窗确认
+    if (isBound && dsaQrOnline) {
       const ok = confirm(
         '重新扫码将断开当前微信会话：\n\n' +
         '· 当前微信号将立即无法继续接收投研研报；\n' +
@@ -1162,7 +1229,7 @@
       fetchAndRenderQr({ force: true });
       return;
     }
-    fetchAndRenderQr();
+    fetchAndRenderQr({ force: true });
   };
 
   window.dsaUnbindWechat = async function() {
@@ -1335,15 +1402,19 @@
     const qrStatusEl = document.getElementById('dsa-qr-status');
     stopQrPolling();
 
+    // 检查当前用户的微信绑定状态
+    const user = currentUser || await checkUser();
+    const isBound = Boolean(user && user.wechat_bound);
+
+    // 新用户如果没绑定微信，应当直接获取并显示二维码，自动强制生成新码（force: 1）
+    const needForce = opts.force || !isBound;
+
     qrContainer.innerHTML = '<span style="color: #666; font-size: 12px;">正在生成微信二维码...</span>';
     qrStatusEl.className = 'dsa-status-badge dsa-status-wait';
-    qrStatusEl.textContent = opts.force ? '⏳ 正在断开当前会话并生成新码...' : '⏳ 获取中...';
+    qrStatusEl.textContent = '⏳ 获取中...';
 
     try {
-      // 两种意图用不同 HTTP 语义表达：
-      //   「只是想看」   -> GET，无参，后端保留「在线就不签发」的短路
-      //   「我要重新扫码」-> POST action=refresh + force=1，后端据此绕过短路签发新码
-      const res = opts.force
+      const res = needForce
         ? await fetch('/api/v1/tenancy/wechat/qrlogin', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1353,10 +1424,8 @@
       if (!res.ok) throw new Error('二维码获取失败');
       const data = await res.json();
 
-      // 通道可能已经在线。这种情况下后端**不再签发二维码** —— 因为让用户扫一个新码
-      // 会顶掉他正在用的那个会话（errcode -14），正是「扫码成功却一直绑不上」的成因。
-      // 这里直接显示「已连接」，把按钮切成「重新扫码」，并且不要开始轮询（没有码可扫）。
-      if (data.logged_in) {
+      // 仅当用户已经绑定微信时，才短路显示「微信通道已在线」；未绑定用户一律展示二维码
+      if (data.logged_in && isBound) {
         qrContainer.innerHTML = '<span style="color: #10b981; font-size: 13px; font-weight: 600;">✅ 微信通道已在线</span>';
         qrStatusEl.className = 'dsa-status-badge dsa-status-confirmed';
         qrStatusEl.textContent = '✅ 微信通道已连接';
@@ -1366,18 +1435,25 @@
         return;
       }
 
+      if (data.logged_in && !isBound && !data.qr_image) {
+        // 未绑定但拿到 logged_in 且无码，主动触发一次 force 刷新
+        return fetchAndRenderQr({ force: true });
+      }
+
       if (data.qr_image) {
         qrContainer.innerHTML = `<img src="${data.qr_image}" style="width: 100%; height: 100%; object-fit: contain; padding: 4px;" alt="WeChat QR">`;
+        qrStatusEl.className = 'dsa-status-badge dsa-status-wait';
         qrStatusEl.textContent = '⏳ 等待微信扫码...';
-        // 已经拿到新码，说明通道不再被短路面具遮蔽；等扫码确认后再由轮询改回在线态。
         dsaQrOnline = false;
         setQrRefreshBtnMode(false);
         startQrPolling();
       } else {
         qrContainer.innerHTML = '<span style="color: #ef4444; font-size: 12px;">生成失败，请点击刷新</span>';
+        setQrRefreshBtnMode(false);
       }
     } catch (e) {
       qrContainer.innerHTML = `<span style="color: #ef4444; font-size: 12px;">连接失败，请点击刷新</span>`;
+      setQrRefreshBtnMode(false);
     }
   }
 
@@ -1455,6 +1531,19 @@
     // Reposition active overlays on each refresh
     positionCustomOverlay();
 
+    // --- 隐藏首页「基础配置未完成」黄色提示条 ---
+    document.querySelectorAll('div[role="alert"]').forEach(function(alertEl) {
+      const txt = alertEl.textContent || '';
+      if (txt.indexOf('基础配置未完成') !== -1 || txt.indexOf('Base configuration incomplete') !== -1 || (txt.indexOf('自选股') !== -1 && txt.indexOf('最小可用分析') !== -1)) {
+        const parent = alertEl.closest('.px-3.pb-2') || alertEl.parentElement;
+        if (parent && parent !== document.body) {
+          parent.style.display = 'none';
+        } else {
+          alertEl.style.display = 'none';
+        }
+      }
+    });
+
     // --- ENFORCE ROLE PERMISSIONS FOR NORMAL USERS ---
     // ⚠️ 这一段必须**双向**。原来只有「藏起来」没有「放出来」，于是从普通成员
     // 切回管理员时，「系统设置」会一直是 hidden —— 表现同样是「菜单没刷新」。
@@ -1502,6 +1591,17 @@
         nav.closest('.max-w-xs') ||
         nav.closest('.animate-slide-in-left')
       );
+
+      // 移动端抽屉内隐藏语言和主题切换选项（移动端顶栏已展示），桌面侧边栏正常保留
+      const toggleButtons = nav.querySelectorAll('button');
+      toggleButtons.forEach(btn => {
+        const hasLang = btn.querySelector('svg.lucide-languages') || (btn.getAttribute('aria-label') || '').includes('语言') || (btn.getAttribute('title') || '').includes('语言');
+        const hasTheme = btn.querySelector('svg.lucide-sun, svg.lucide-moon') || (btn.getAttribute('aria-label') || '').includes('主题');
+        if (hasLang || hasTheme) {
+          const wrapper = btn.closest('div.relative') || btn;
+          wrapper.style.display = isInsideDrawer ? 'none' : '';
+        }
+      });
 
       const sidebarGroup = document.createElement('div');
       sidebarGroup.className = 'dsa-nav-extension-group';

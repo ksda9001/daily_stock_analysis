@@ -43,7 +43,6 @@ export const UiLanguageToggle: React.FC<UiLanguageToggleProps> = ({
               : isNavVariant
                 ? 'group relative flex h-12 w-full select-none items-center gap-3 rounded-[1.35rem] border border-transparent px-4 text-sm text-secondary-text transition-all duration-300 hover:bg-hover hover:text-foreground'
                 : 'inline-flex h-10 items-center gap-2 rounded-xl border border-border/70 bg-card/80 px-3 text-sm text-secondary-text shadow-soft-card transition-colors hover:bg-hover hover:text-foreground',
-          triggerActiveClassName,
           isNavVariant && collapsed ? 'justify-center px-2' : ''
         )}
         aria-label={t('language.toggle')}

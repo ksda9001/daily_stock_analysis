@@ -83,6 +83,10 @@ class TenantUser(Base):
     def is_admin(self) -> bool:
         return self.role == "admin"
 
+    @property
+    def wechat_bound(self) -> bool:
+        return bool(self.wechat_id)
+
     def to_public_dict(self) -> Dict[str, Any]:
         """对外暴露的用户信息（绝不包含 ``password_hash``）。"""
         return {

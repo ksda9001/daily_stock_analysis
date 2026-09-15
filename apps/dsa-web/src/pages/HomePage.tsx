@@ -1677,30 +1677,7 @@ const HomePage: React.FC = () => {
           </div>
         ) : null}
 
-        {setupNeedsAction ? (
-          <div className="px-3 pb-2 md:px-4">
-            <InlineAlert
-              variant="warning"
-              title={t('home.setupIncomplete')}
-              message={
-                setupMissingLabels
-                  ? t('home.setupMissingWithLabels', { labels: setupMissingLabels })
-                  : t('home.setupMissingGeneric')
-              }
-              action={(
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => navigate('/settings')}
-                >
-                  {t('home.goSettings')}
-                </Button>
-              )}
-              className="rounded-xl px-3 py-2 text-xs shadow-none"
-            />
-          </div>
-        ) : null}
+        {/* 用户要求：首页不再显示基础配置未完成提示 */}
 
         <div className="flex-1 flex min-h-0 overflow-hidden">
           <div className="hidden min-h-0 w-64 shrink-0 flex-col overflow-hidden pl-4 pb-4 md:flex lg:w-72">

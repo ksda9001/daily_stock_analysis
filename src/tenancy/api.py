@@ -431,12 +431,30 @@ async def wechat_unbind(request: Request, principal: Principal = Depends(require
 
 
 @router.get("/wechat/qrlogin", summary="获取微信二维码（代理 CowAgent）")
-async def get_wechat_qr():
-    """获取当前 CowAgent 的实时微信二维码。"""
+async def get_wechat_qr(
+    req: Request,
+    force: bool = False,
+):
+    """获取当前 CowAgent 的实时微信二维码。未绑定微信的用户自动获取新二维码。"""
     import httpx
+    from src.tenancy.middleware import resolve_request_principal
+
+    principal = resolve_request_principal(req)
+    should_force = force
+    if principal is not None:
+        user = service.get_user(principal.user_id)
+        if user and not getattr(user, "wechat_id", None):
+            should_force = True
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get("http://cowagent:9899/api/weixin/qrlogin")
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            if should_force:
+                resp = await client.post(
+                    "http://cowagent:9899/api/weixin/qrlogin",
+                    json={"action": "refresh", "force": 1},
+                )
+            else:
+                resp = await client.get("http://cowagent:9899/api/weixin/qrlogin")
             return JSONResponse(status_code=resp.status_code, content=resp.json())
     except Exception as exc:
         logger.error("[tenancy] failed to proxy qrlogin from cowagent: %s", exc)
@@ -454,6 +472,13 @@ async def poll_wechat_qr(request: Request):
         body = await request.json()
     except Exception:
         body = {"action": "poll"}
+    if body.get("action") == "refresh" and not body.get("force"):
+        from src.tenancy.middleware import resolve_request_principal
+        principal = resolve_request_principal(request)
+        if principal is not None:
+            user = service.get_user(principal.user_id)
+            if user and not getattr(user, "wechat_id", None):
+                body["force"] = 1
     try:
         async with httpx.AsyncClient(timeout=40.0) as client:
             resp = await client.post("http://cowagent:9899/api/weixin/qrlogin", json=body)

@@ -165,7 +165,6 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({ collapsed = false, onNav
           collapsed={collapsed}
           wrapperClassName="w-full"
           triggerClassName={itemInteractiveClass}
-          triggerActiveClassName={itemActiveClass}
           iconClassName={itemIconClass}
           labelClassName={itemLabelClass}
         />
