@@ -200,18 +200,82 @@ def _fmt_price(value: Any) -> str:
     return f"{number:,.2f}"
 
 
-def _fmt_pct(value: Any) -> str:
+def _fmt_pct(value: Any, *, signed: bool = True) -> str:
+    """百分比。``signed=False`` 用于振幅 —— 振幅恒为正，带 ``+`` 号反而费解。"""
     if value is None:
         return "--"
     try:
         number = float(value)
     except (TypeError, ValueError):
         return "--"
-    return f"{number:+.2f}%"
+    return f"{number:+.2f}%" if signed else f"{number:.2f}%"
+
+
+def _fmt_amount(value: Any) -> str:
+    """成交额按 亿/万 缩写。
+
+    与 ``notification.NotificationService._format_amount_cn`` **保持同一口径**
+    （1e8 以上转「亿」、1e4 以上转「万」），这样推送里的数字与页面/研报里
+    看到的读法一致 —— 用户不会在微信上看到「1627385746.00」这种原始值。
+    """
+    if value is None:
+        return "--"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    if amount != amount:  # NaN
+        return "--"
+    sign = "-" if amount < 0 else ""
+    magnitude = abs(amount)
+    if magnitude >= 1e8:
+        return f"{sign}{magnitude / 1e8:.2f} 亿"
+    if magnitude >= 1e4:
+        return f"{sign}{magnitude / 1e4:.2f} 万"
+    return f"{sign}{magnitude:.0f}"
+
+
+def _fmt_volume(value: Any) -> str:
+    """成交量按 亿股/万股 缩写。
+
+    ⚠️ 与成交额的换算**不同**：成交量的单位是「股」，A 股一只票一天常见量级
+    在千万到几亿股，直接用原始值会有 9~10 位数字，手机上读不出量级。
+    """
+    if value is None:
+        return "--"
+    try:
+        volume = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    if volume != volume:  # NaN
+        return "--"
+    if volume >= 1e8:
+        return f"{volume / 1e8:.2f} 亿股"
+    if volume >= 1e4:
+        return f"{volume / 1e4:.2f} 万股"
+    return f"{volume:.0f} 股"
+
+
+def _fmt_ratio(value: Any, *, suffix: str = "") -> str:
+    """倍率类字段（量比/换手率比率），无值时给 ``--``。"""
+    if value is None:
+        return "--"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{number:.2f}{suffix}"
 
 
 def fetch_indices() -> List[Dict[str, Any]]:
-    """取 A 股主要指数行情。失败返回空列表（推送里会显示为「暂不可用」）。"""
+    """取 A 股主要指数行情。失败返回空列表（推送里会显示为「暂不可用」）。
+
+    ⚠️ **保留数据源的原始字段**，不要在抓取层裁剪。渲染层需要哪些字段是
+    渲染层的事 —— 这里一旦只挑 4 个字段，后面想补全是补不回来的（只能改这里）。
+    实测 ``get_main_indices`` 提供：``current`` / ``change`` / ``change_pct`` /
+    ``open`` / ``high`` / ``low`` / ``prev_close`` / ``volume`` / ``amount`` /
+    ``amplitude``。
+    """
     try:
         from data_provider.base import DataFetcherManager
 
@@ -226,14 +290,10 @@ def fetch_indices() -> List[Dict[str, Any]]:
             continue
         code = str(row.get("code") or "")
         name = row.get("name") or _INDEX_NAME_FALLBACK.get(code)
-        out.append(
-            {
-                "code": code,
-                "name": name,
-                "current": row.get("current"),
-                "change_pct": row.get("change_pct"),
-            }
-        )
+        item = dict(row)          # 先整体保留，再覆盖规范化后的 code/name
+        item["code"] = code
+        item["name"] = name
+        out.append(item)
     return out
 
 
@@ -243,6 +303,17 @@ def _fetch_one_quote(code: str) -> Dict[str, Any]:
     ⚠️ 每次调用都**新建** ``DataFetcherManager``。共享一个 manager 会让各 worker
     在它的 per-fetcher 调用锁上串行化，把「并发」变回「顺序」—— 这一点在
     ``portfolio_service._prefetch_realtime_position_prices`` 的注释里有明确记录。
+
+    ⚠️ **这里保留数据源的全部字段**（原先只留 4 个：code/name/price/change_pct）。
+    这是 2026-09-15 用户反馈「推送太省略」的**根因** —— 数据在抓取层就被丢弃，
+    渲染层再想补全也无从取起。底层的 ``RealtimeQuote`` 有 21 个字段，实测可用：
+    ``open_price`` / ``high`` / ``low`` / ``pre_close`` / ``change_amount`` /
+    ``volume`` / ``amount`` / ``volume_ratio`` / ``turnover_rate`` /
+    ``amplitude`` / ``pe_ratio`` / ``pb_ratio`` / ``total_mv`` / ``circ_mv`` /
+    ``source`` / ``fetched_at`` 等。
+
+    只丢弃 ``None`` 值以省内存 —— 保留 ``None`` 会让下游的 ``.get()`` 拿到
+    ``None`` 而非「键不存在」，两种情况都要处理，不如统一成前者。
     """
     try:
         from data_provider.base import DataFetcherManager
@@ -254,13 +325,25 @@ def _fetch_one_quote(code: str) -> Dict[str, Any]:
 
     if quote is None:
         return {"code": code, "ok": False}
-    return {
-        "code": getattr(quote, "code", None) or code,
-        "name": getattr(quote, "name", None),
-        "price": getattr(quote, "price", None),
-        "change_pct": getattr(quote, "change_pct", None),
-        "ok": True,
-    }
+
+    import dataclasses
+
+    fields: Dict[str, Any] = {}
+    if dataclasses.is_dataclass(quote):
+        for field in dataclasses.fields(quote):
+            fields[field.name] = getattr(quote, field.name, None)
+    else:  # 兜底：不是 dataclass 就退回 __dict__（历史上曾是普通对象）
+        fields.update(getattr(quote, "__dict__", {}) or {})
+
+    out: Dict[str, Any] = {"ok": True}
+    for key, value in fields.items():
+        if value is None:
+            continue
+        # ``RealtimeSource`` 之类的枚举取 ``.value``，否则 JSON 序列化会失败。
+        out[key] = getattr(value, "value", value)
+
+    out["code"] = out.get("code") or code
+    return out
 
 
 def fetch_watchlist_quotes(codes: List[str]) -> List[Dict[str, Any]]:
@@ -298,6 +381,71 @@ def fetch_watchlist_quotes(codes: List[str]) -> List[Dict[str, Any]]:
 # 渲染
 # ---------------------------------------------------------------------------
 
+def _render_index_table(indices: List[Dict[str, Any]]) -> List[str]:
+    """大盘指数表。字段口径对齐 ``notification._append_market_snapshot``。"""
+    lines: List[str] = [
+        "| 指数 | 最新 | 涨跌幅 | 涨跌额 | 今开 | 最高 | 最低 | 昨收 | 振幅 | 成交额 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for item in indices:
+        name = item.get("name") or item.get("code") or "指数"
+        lines.append(
+            "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |"
+            % (
+                name,
+                _fmt_price(item.get("current")),
+                _fmt_pct(item.get("change_pct")),
+                _fmt_price(item.get("change")),
+                _fmt_price(item.get("open")),
+                _fmt_price(item.get("high")),
+                _fmt_price(item.get("low")),
+                _fmt_price(item.get("prev_close")),
+                _fmt_pct(item.get("amplitude"), signed=False),
+                _fmt_amount(item.get("amount")),
+            )
+        )
+    return lines
+
+
+def _render_stock_block(item: Dict[str, Any]) -> List[str]:
+    """单只自选股的行情块。
+
+    刻意**一只一块**而不是塞进一张大表：微信里宽表会折行到读不出来，而
+    「标签：值」的竖排在小屏上反而清楚。字段与页面 ``/stocks/{code}/quote``
+    以及研报里的「当日行情」表保持一致。
+    """
+    code = item.get("code") or ""
+    name = item.get("name") or code
+    lines = [
+        f"**{name} {code}**",
+        "",
+        "| 现价 | 涨跌幅 | 涨跌额 | 今开 | 最高 | 最低 | 昨收 |",
+        "|---|---|---|---|---|---|---|",
+        "| %s | %s | %s | %s | %s | %s | %s |"
+        % (
+            _fmt_price(item.get("price")),
+            _fmt_pct(item.get("change_pct")),
+            _fmt_price(item.get("change_amount")),
+            _fmt_price(item.get("open_price")),
+            _fmt_price(item.get("high")),
+            _fmt_price(item.get("low")),
+            _fmt_price(item.get("pre_close")),
+        ),
+        "",
+        "| 振幅 | 量比 | 换手率 | 成交量 | 成交额 |",
+        "|---|---|---|---|---|",
+        "| %s | %s | %s | %s | %s |"
+        % (
+            _fmt_pct(item.get("amplitude"), signed=False),
+            _fmt_ratio(item.get("volume_ratio")),
+            _fmt_pct(item.get("turnover_rate"), signed=False),
+            _fmt_volume(item.get("volume")),
+            _fmt_amount(item.get("amount")),
+        ),
+    ]
+    return lines
+
+
 def render_digest(
     *,
     slot: str,
@@ -308,26 +456,29 @@ def render_digest(
 ) -> str:
     """把抓到的行情渲染成推送正文。
 
-    刻意用「纯文本也能读」的 Markdown：这条正文会经由 CowAgent 的会话发到
-    微信，而微信对 Markdown 的支持有限。加粗与短横线列表在纯文本下依然清楚，
-    加粗在支持的客户端里也不会变成噪声。
+    数据质量对齐 DSA 自身的报告口径（``notification.NotificationService``
+    的「当日行情」表）：成交额按 亿/万 缩写、涨跌幅带符号、振幅不带符号。
+
+    ⚠️ **不在这里做长度分页。** 微信渠道层
+    (``channel/weixin/weixin_channel.py``) 已有 ``_split_text``：超过
+    ``TEXT_CHUNK_LIMIT``(4000) 会自动按「段落 → 行 → 硬切」的优先级切分，
+    段间还会 ``sleep(0.5)``。这里再分一次只会把表格从中间切断，
+    反而破坏可读性。让它长，交给渠道切。
     """
     lines: List[str] = []
     lines.append(f"**A股行情速览 · {slot}**" if slot else "**A股行情速览**")
     lines.append("")
 
     lines.append("**大盘**")
+    lines.append("")
     if indices:
-        for item in indices:
-            name = item.get("name") or item.get("code") or "指数"
-            lines.append(
-                f"- {name} {_fmt_price(item.get('current'))} {_fmt_pct(item.get('change_pct'))}"
-            )
+        lines.extend(_render_index_table(indices))
     else:
         lines.append("- 指数行情暂不可用")
     lines.append("")
 
     lines.append("**自选股**")
+    lines.append("")
     if not watchlist:
         if watchlist_source == "global":
             lines.append("- 还没有自选股（当前沿用全局列表，也是空的）")
@@ -340,10 +491,11 @@ def render_digest(
             if not item.get("ok"):
                 failed.append(code)
                 continue
-            name = item.get("name") or code
-            lines.append(
-                f"- {name} {code} {_fmt_price(item.get('price'))} {_fmt_pct(item.get('change_pct'))}"
-            )
+            block = _render_stock_block(item)
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.extend(block)
+            lines.append("")
         if failed:
             lines.append(f"- （{'、'.join(failed)} 行情暂不可用）")
     lines.append("")
