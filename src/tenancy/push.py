@@ -378,6 +378,153 @@ def fetch_watchlist_quotes(codes: List[str]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# 完整报告（推送正文的主体）
+# ---------------------------------------------------------------------------
+
+#: 大盘复盘记录在 ``analysis_history`` 里的 ``code`` / ``report_type`` 约定值。
+MARKET_REVIEW_CODE = "MARKET"
+MARKET_REVIEW_REPORT_TYPE = "market_review"
+
+#: 个股完整研报的 ``report_type``（``simple`` 是精简版，不用）。
+STOCK_REPORT_TYPE = "full"
+
+#: 报告新鲜度上限（小时）。
+#:
+#: 推一份三天前的研报是**有害的** —— 里面的买卖点位早已失效，用户照做会亏钱。
+#: 宁可退回实时行情，也不要推过期结论。
+REPORT_MAX_AGE_HOURS = 24
+
+
+def _latest_record_id(
+    tenant_id: Optional[int],
+    report_type: str,
+    code: str,
+    since: datetime,
+) -> Optional[int]:
+    """取最新一条分析记录的主键。
+
+    ⚠️ **必须绑定租户上下文**：``src/tenancy/scope.py`` 在 ORM 层装了
+    ``do_orm_execute`` 守卫，对 ``analysis_history`` 自动施加租户谓词，且
+    失败策略是 **fail-closed** —— 上下文无身份时收窄到系统属主（1），
+    表现为**静默查不到任何数据**（不报错）。本函数是后台任务，
+    没有请求中间件代劳，必须显式 ``bind_user``。
+
+    ``tenant_id=None`` 用于大盘复盘 —— 它是**共享行**（``SHARED_TENANT_ID``），
+    不属于任何用户，所有租户可读。这不是「放宽过滤」，而是这类数据本来
+    就没有归属（见 ``scope.py`` 的「共享行」一节）。
+    """
+    try:
+        from sqlalchemy import desc, select
+
+        from src.storage import AnalysisHistory, get_db
+        from src.tenancy.context import SHARED_TENANT_ID, bind_user
+    except Exception as exc:  # noqa: BLE001 - 依赖缺失不应让推送整体失败
+        logger.warning("[push] cannot import storage for reports: %s", exc)
+        return None
+
+    scope_id = SHARED_TENANT_ID if tenant_id is None else int(tenant_id)
+    try:
+        with bind_user(scope_id):
+            with get_db().session_scope() as session:
+                stmt = select(AnalysisHistory).where(
+                    AnalysisHistory.report_type == report_type,
+                    AnalysisHistory.code == code,
+                    AnalysisHistory.created_at >= since,
+                )
+                if tenant_id is not None:
+                    stmt = stmt.where(AnalysisHistory.tenant_id == int(tenant_id))
+                stmt = stmt.order_by(desc(AnalysisHistory.created_at)).limit(1)
+                record = session.execute(stmt).scalars().first()
+                return int(record.id) if record is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[push] report lookup failed (tenant=%s type=%s code=%s): %s",
+            tenant_id,
+            report_type,
+            code,
+            exc,
+        )
+        return None
+
+
+def _render_record_markdown(record_id: int, scope_id: int) -> Optional[str]:
+    """渲染单条记录的报告全文。
+
+    复用 ``HistoryService.get_markdown_report()`` —— 这是 Web 首页「查看报告」
+    与 DSA 原生推送（Server酱3 / 企业微信）**共用的同一个渲染入口**。
+    不自己拼 Markdown：一旦各写一份，口径迟早分叉。
+
+    随后做 ``strip_hidden_markdown_metadata`` —— 这一步不是可选项：
+    ``get_markdown_report`` 的产物开头带 ``[dsa-market-region]: # (cn)``
+    这类内部引用定义，DSA 原生推送在发送前**同样会剥掉它**
+    （``serverchan3_sender`` 第 71 行）。少了这步，用户会在正文最上面
+    看到一行莫名其妙的内部标记。
+    """
+    try:
+        from src.formatters import strip_hidden_markdown_metadata
+        from src.services.history_service import HistoryService
+        from src.storage import get_db
+        from src.tenancy.context import bind_user
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[push] cannot import history service: %s", exc)
+        return None
+
+    try:
+        with bind_user(scope_id):
+            text = HistoryService(get_db()).get_markdown_report(str(record_id))
+    except Exception as exc:  # noqa: BLE001 - 单份报告失败不该拖垮整条推送
+        logger.warning("[push] render report failed for record %s: %s", record_id, exc)
+        return None
+    if not text or not text.strip():
+        return None
+    return strip_hidden_markdown_metadata(text).strip()
+
+
+def collect_report_text(tenant_id: int, codes: List[str], now: datetime) -> str:
+    """收集该租户的推送正文：大盘复盘 + 各只自选股研报。
+
+    组装顺序与读报习惯一致：**先大盘、后个股**。
+
+    ⚠️ **不做长度分页。** 微信渠道层 ``channel/weixin/weixin_channel.py``
+    已有 ``_split_text``（``TEXT_CHUNK_LIMIT`` = 4000），按
+    「段落 → 行 → 硬切」切分，段间还会 ``sleep(0.5)``。业务层再分一次
+    只会把表格从中间切断。
+
+    返回 ``""`` 表示该租户暂时没有任何可用报告，由调用方决定兜底。
+    """
+    from src.tenancy.context import SHARED_TENANT_ID
+
+    since = now - timedelta(hours=REPORT_MAX_AGE_HOURS)
+    sections: List[str] = []
+
+    # 大盘复盘：共享内容，不按租户过滤。
+    review_id = _latest_record_id(None, MARKET_REVIEW_REPORT_TYPE, MARKET_REVIEW_CODE, since)
+    if review_id is not None:
+        review = _render_record_markdown(review_id, SHARED_TENANT_ID)
+        if review:
+            sections.append(review)
+    else:
+        logger.info("[push] tenant %s: no market review within %sh", tenant_id, REPORT_MAX_AGE_HOURS)
+
+    # 个股研报：**必须**按租户过滤 —— 私有数据，跨租户可见即越权。
+    for code in codes:
+        clean = str(code or "").strip().upper()
+        if not clean:
+            continue
+        record_id = _latest_record_id(int(tenant_id), STOCK_REPORT_TYPE, clean, since)
+        if record_id is None:
+            logger.info("[push] tenant %s: no fresh report for %s", tenant_id, clean)
+            continue
+        body = _render_record_markdown(record_id, int(tenant_id))
+        if body:
+            sections.append(body)
+
+    if not sections:
+        return ""
+    return "\n\n---\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
 # 渲染
 # ---------------------------------------------------------------------------
 
@@ -562,8 +709,19 @@ def build_user_digest(
     codes = list(stock_view.get("stock_codes") or [])
     watchlist = fetch_watchlist_quotes(codes)
 
-    if not indices and not any(item.get("ok") for item in watchlist):
-        # 两条数据线都空 → 推出去只是一条「什么都拿不到」的噪声。
+    # 正文主体 = 该租户已落库的完整分析报告（大盘复盘 + 各只自选股研报）。
+    # 这份内容与 DSA 原生推送（Server酱3 / 企业微信）**完全同源** ——
+    # 都出自 notification.NotificationService 的 dashboard 渲染，经由
+    # HistoryService.get_markdown_report() 取回。不再自己拼一份简版，
+    # 否则两处口径必然分叉（用户看到的微信推送和 App 推送不一样）。
+    #
+    # ⚠️ 只读 analysis_history，**不在这里跑分析**：完整分析个股约 105 秒/只，
+    # 09:35 这个时段来不及。报告由 runtime_scheduler 的租户 fan-out 预先产出。
+    report_text = collect_report_text(tenant_id, codes, moment)
+
+    watchlist_ok = [item for item in watchlist if item.get("ok")]
+    if not report_text and not indices and not watchlist_ok:
+        # 三条数据线都空 → 推出去只是一条「什么都拿不到」的噪声。
         # 刻意**不**写去重标记，让同一个时段内的下一次轮询还能重试。
         logger.warning("[push] user %s: no data available, skipping this slot", tenant_id)
         return {
@@ -571,10 +729,11 @@ def build_user_digest(
             "skip": True,
             "reason": "no_data",
             "push_times": times,
-            "message": "行情数据源暂不可用，本次不推送",
+            "message": "行情与研报数据源暂不可用，本次不推送",
         }
 
-    text = render_digest(
+    # 有报告就用报告；报告缺失时才退回实时行情，避免推出一条空消息。
+    text = report_text or render_digest(
         slot=slot,
         indices=indices,
         watchlist=watchlist,
@@ -586,11 +745,12 @@ def build_user_digest(
         mark_sent(tenant_id, slot, moment)
 
     logger.info(
-        "[push] user %s slot=%s indices=%d watchlist=%d text_len=%d",
+        "[push] user %s slot=%s report=%d indices=%d watchlist=%d text_len=%d",
         tenant_id,
         slot or "-",
+        len(report_text),
         len(indices),
-        len([item for item in watchlist if item.get("ok")]),
+        len(watchlist_ok),
         len(text),
     )
 
