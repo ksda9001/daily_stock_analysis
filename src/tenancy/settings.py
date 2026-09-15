@@ -651,34 +651,47 @@ def _write_user_stock_list(tenant_id: int, codes: List[str]) -> List[str]:
 
 
 def user_stock_list(tenant_id: int) -> Optional[List[str]]:
-    """用户自己的自选；未配置返回 ``None``（表示「沿用全局」）。"""
+    """用户自己的自选；未配置返回 ``None``。
+
+    ⚠️ 返回值 ``None`` 仅表示「该租户没有个人配置」，**不再表示「沿用全局」**。
+    全局 ``STOCK_LIST`` 是进程级基础设施配置，多租户下任何情况下都不应当被
+    当作个人自选的兜底 —— 否则未配置用户会看到全局值，而全局值一旦被写入
+    污染，就等价于跨租户泄漏。调用方需要「空列表」语义时用
+    :func:`resolve_stock_list`。
+    """
     return effective_stock_list(tenant_id)
 
 
 def resolve_stock_list(tenant_id: int) -> Dict[str, Any]:
-    """自选视图：区分「个人已配置」与「沿用全局」。"""
-    own = user_stock_list(tenant_id)
-    if own is not None:
-        return {"stock_codes": own, "source": "user", "inherited_from_global": False}
-    return {"stock_codes": global_stock_list(), "source": "global", "inherited_from_global": True}
+    """自选视图：只返回该租户自己的列表，**不回退全局**。
 
-
-def _base_list_for_mutation(tenant_id: int):
-    """取「改动的起点」：优先个人列表，未配置则继承全局。
-
-    返回 ``(base, inherited)``。
+    未配置个人自选时返回空列表（``source="user"``）。这是刻意的隔离设计：
+    多租户下不存在「共享自选」的概念，全局 ``STOCK_LIST`` 只是单用户模式
+    与调度兜底用的基础设施配置，不参与租户视图。
     """
     own = user_stock_list(tenant_id)
     if own is None:
-        return global_stock_list(), True
+        return {"stock_codes": [], "source": "user", "inherited_from_global": False}
+    return {"stock_codes": own, "source": "user", "inherited_from_global": False}
+
+
+def _base_list_for_mutation(tenant_id: int):
+    """取「改动的起点」：只取个人列表，未配置从空列表开始。
+
+    返回 ``(base, inherited)``。``inherited`` 恒为 ``False`` —— 保留该键是
+    为了兼容既有返回结构，避免调用方 KeyError。
+    """
+    own = user_stock_list(tenant_id)
+    if own is None:
+        return [], False
     return list(own), False
 
 
 def add_user_stock(tenant_id: int, stock_code: Any) -> Dict[str, Any]:
     """加入自选。
 
-    ⚠️ 用户尚未配置个人列表时**先继承全局列表再追加**。否则「加一只」会把
-    继承来的整份自选替换成这一只 —— 这是很容易踩的坑。
+    ⚠️ 用户尚未配置个人列表时**从空列表开始**，不再继承全局 —— 继承会让
+    「加一只」把全局其他租户的股票一并复制进个人列表。
     """
     code = normalize_stock_code(stock_code)
     base, inherited = _base_list_for_mutation(tenant_id)
@@ -696,7 +709,7 @@ def add_user_stock(tenant_id: int, stock_code: Any) -> Dict[str, Any]:
 
 
 def remove_user_stock(tenant_id: int, stock_code: Any) -> Dict[str, Any]:
-    """从自选移除（同样先继承全局，避免误删继承来的其他股票）。"""
+    """从自选移除：只操作该租户个人列表，未配置时起点为空。"""
     code = normalize_stock_code(stock_code)
     base, inherited = _base_list_for_mutation(tenant_id)
     was_present = code in base
@@ -720,7 +733,10 @@ def replace_user_stock_list(tenant_id: int, codes: Sequence[Any]) -> Dict[str, A
 
 
 def reset_user_stock_list(tenant_id: int) -> Dict[str, Any]:
-    """清空个人自选，回落到全局配置。"""
+    """清空个人自选（删除该租户的 STOCK_LIST 覆盖）。
+
+    删除后 :func:`resolve_stock_list` 返回空列表，**不再回落到全局**。
+    """
     delete_user_settings(tenant_id, ["STOCK_LIST"])
     return resolve_stock_list(tenant_id)
 

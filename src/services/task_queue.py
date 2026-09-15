@@ -137,7 +137,29 @@ class TaskInfo:
     # parser 来源的可选资产类型（``index``/``stock``/``None``）；SSE 与任务列表
     # 从这里透传，不得在消费端重新猜测。
     asset_type: Optional[str] = None
-    
+    # ---- 多租户归属 ----
+    # 任务在内存队列里是全局索引的（单例 ``_tasks``），而多租户隔离的唯一
+    # 执行点在 SQLAlchemy 会话层，覆盖不到内存对象。因此必须把归属信息
+    # **固化在任务对象上**，由 submit 时捕获、列表/SSE 消费时过滤。
+    # 两者都为 ``None`` 表示「无租户上下文」（单用户模式或系统内部任务），
+    # 这类任务对任何人都不可见 —— 见 ``visible_to_tenant``。
+    tenant_id: Optional[int] = None
+    owner_id: Optional[int] = None
+
+    def visible_to_tenant(self, tenant_id: Optional[int]) -> bool:
+        """该任务是否对给定租户可见。
+
+        规则（刻意从严）：
+        - 任务没有归属（``tenant_id is None``）→ 只有「无租户上下文」的
+          调用方（``tenant_id is None``，单用户模式 / 系统内部）能看到；
+        - 任务有归属 → 必须与调用方租户完全相等。
+
+        这样即便某个调用点漏传身份，也只会「看不到」，而不会「看到别人的」。
+        """
+        if self.tenant_id is None:
+            return tenant_id is None
+        return self.tenant_id == tenant_id
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert task info into an API-friendly dictionary."""
         payload = {
@@ -192,7 +214,39 @@ class TaskInfo:
             dedupe_key=self.dedupe_key,
             analysis_target=self.analysis_target,
             asset_type=self.asset_type,
+            tenant_id=self.tenant_id,
+            owner_id=self.owner_id,
         )
+
+
+def _capture_tenant_identity() -> Tuple[Optional[int], Optional[int]]:
+    """捕获当前请求的租户归属 ``(tenant_id, owner_id)``。
+
+    任务入队与列表过滤共用这一份逻辑，保证「谁提交的」与「谁能看见」
+    用的是同一身份来源。
+
+    返回 ``(None, None)`` 的三种正常情形（都不是错误）：
+    1. 单用户模式（``DSA_MULTIUSER_ENABLED`` 未开）；
+    2. 系统内部任务（调度线程、启动自检）—— 此时没有请求上下文；
+    3. 身份解析异常。
+
+    这三种情形下任务**对任何租户都不可见**（见
+    :meth:`TaskInfo.visible_to_tenant`），避免「无主的任务被所有人看到」。
+    系统内部任务本身也不需要出现在用户的 WebUI 列表里。
+    """
+    try:
+        from src.tenancy.context import current_principal, multiuser_enabled
+
+        if not multiuser_enabled():
+            return None, None
+        principal = current_principal()
+        if principal is None:
+            return None, None
+        user_id = getattr(principal, "user_id", None)
+        return user_id, user_id
+    except Exception as exc:  # noqa: BLE001 - 身份捕获失败不应让入队失败
+        logger.warning("[task_queue] 捕获租户身份失败，任务将标记为无归属: %s", exc)
+        return None, None
 
 
 class DuplicateTaskError(Exception):
@@ -243,8 +297,11 @@ class AnalysisTaskQueue:
         self._analyzing_stocks: Dict[str, str] = {}     # dedupe_key -> task_id
         self._futures: Dict[str, Future] = {}           # task_id -> Future
         
-        # SSE 订阅者列表（asyncio.Queue 实例）
-        self._subscribers: List['AsyncQueue'] = []
+        # SSE 订阅者：asyncio.Queue -> 订阅者所属 tenant_id（``None`` 表示
+        # 无租户上下文，单用户模式）。
+        # ⚠️ 必须记录订阅者身份：SSE 是「一条连接收所有事件」的广播模型，
+        # 不按订阅者过滤就等于把每个人的任务进度实时推给所有人。
+        self._subscribers: Dict['AsyncQueue', Optional[int]] = {}
         self._subscribers_lock = threading.Lock()
         
         # 主事件循环引用（用于跨线程广播）
@@ -501,6 +558,7 @@ class AnalysisTaskQueue:
 
                 task_id = uuid.uuid4().hex
                 task_skills = list(skills) if skills is not None else None
+                task_tenant_id, task_owner_id = _capture_tenant_identity()
                 task_info = TaskInfo(
                     task_id=task_id,
                     trace_id=task_id,
@@ -519,6 +577,8 @@ class AnalysisTaskQueue:
                     dedupe_key=dedupe_key,
                     analysis_target=analysis_target,
                     asset_type=asset_type_from_analysis_target(analysis_target),
+                    tenant_id=task_tenant_id,
+                    owner_id=task_owner_id,
                 )
                 self._tasks[task_id] = task_info
                 self._analyzing_stocks[dedupe_key] = task_id
@@ -573,6 +633,7 @@ class AnalysisTaskQueue:
         map to standard per-stock async analysis flow.
         """
         task_id = task_id or uuid.uuid4().hex
+        task_tenant_id, task_owner_id = _capture_tenant_identity()
         task_info = TaskInfo(
             task_id=task_id,
             trace_id=trace_id or task_id,
@@ -582,6 +643,8 @@ class AnalysisTaskQueue:
             message=message,
             report_type=report_type,
             region=region,
+            tenant_id=task_tenant_id,
+            owner_id=task_owner_id,
         )
 
         with self._data_lock:
@@ -620,18 +683,24 @@ class AnalysisTaskQueue:
                     del self._analyzing_stocks[dedupe_key]
     
     def get_task(self, task_id: str) -> Optional[TaskInfo]:
-        """
-        获取任务信息
-        
+        """获取任务信息（**多租户下按归属过滤**）。
+
+        不属于当前租户的任务一律返回 ``None`` —— 对调用方等价于「任务不存在」。
+        这里刻意「装作不存在」而不是抛 403：泄漏 task_id 存在性本身就是
+        信息泄漏，而且上层端点已有统一的 404 处理路径。
+
         Args:
             task_id: 任务 ID
-            
+
         Returns:
             TaskInfo 或 None
         """
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._data_lock:
             task = self._tasks.get(task_id)
-            return task.copy() if task else None
+            if not task or not task.visible_to_tenant(tenant_id):
+                return None
+            return task.copy()
 
     def append_task_flow_event(
         self,
@@ -664,60 +733,80 @@ class AnalysisTaskQueue:
         return event_payload
 
     def get_task_flow_events(self, task_id: str) -> List[Dict[str, Any]]:
-        """Return a copy of the recent run-flow events for a task."""
+        """Return a copy of the recent run-flow events for a task.
+
+        多租户下按归属过滤：不属于当前租户的任务返回空列表（与
+        :meth:`get_task` 的「装作不存在」保持一致）。
+        """
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._data_lock:
             task = self._tasks.get(task_id)
-            if not task:
+            if not task or not task.visible_to_tenant(tenant_id):
                 return []
             return copy.deepcopy(task.flow_events)
     
     def list_pending_tasks(self) -> List[TaskInfo]:
-        """
-        获取所有进行中的任务（pending + processing）
-        
+        """获取**当前租户**进行中的任务（pending + processing）。
+
+        多租户隔离：按 :func:`_capture_tenant_identity` 解析出的身份过滤。
+        无租户上下文时（单用户模式）返回全部，与历史行为一致。
+
         Returns:
             任务列表（副本）
         """
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._data_lock:
             return [
                 task.copy() for task in self._tasks.values()
                 if task.status in (TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.CANCEL_REQUESTED)
+                and task.visible_to_tenant(tenant_id)
             ]
-    
+
     def list_all_tasks(self, limit: int = 50) -> List[TaskInfo]:
-        """
-        获取所有任务（按创建时间倒序）
-        
+        """获取**当前租户**的全部任务（按创建时间倒序，limit 在过滤后生效）。
+
+        ⚠️ 内存队列是全局单例，任务对象上固化的 ``tenant_id`` 是唯一的隔离
+        依据 —— SQLAlchemy 会话层的租户守卫看不到内存 dict。这里不做过滤
+        就等于把所有人的分析任务暴露给所有人。
+
         Args:
             limit: 返回数量限制
-            
+
         Returns:
             任务列表（副本）
         """
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._data_lock:
             tasks = sorted(
                 self._tasks.values(),
                 key=lambda t: t.created_at,
                 reverse=True
             )
-            return [t.copy() for t in tasks[:limit]]
+            visible = [t for t in tasks if t.visible_to_tenant(tenant_id)]
+            # limit 必须在过滤后截断：先截断再过滤会让分页结果被他人任务挤占，
+            # 表现为「翻了几页都是空的」。
+            return [t.copy() for t in visible[:limit]]
     
     def get_task_stats(self) -> Dict[str, int]:
-        """
-        获取任务统计信息
+        """获取**当前租户**的任务统计信息。
+
+        与 :meth:`list_all_tasks` 同样按租户过滤 —— 否则任务列表已隔离、
+        但计数仍是全局值，等于把「别人有多少任务在跑」泄漏出去。
         
         Returns:
             统计信息字典
         """
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._data_lock:
+            visible = [t for t in self._tasks.values() if t.visible_to_tenant(tenant_id)]
             stats = {
-                "total": len(self._tasks),
+                "total": len(visible),
                 "pending": 0,
                 "processing": 0,
                 "completed": 0,
                 "failed": 0,
             }
-            for task in self._tasks.values():
+            for task in visible:
                 stats[task.status.value] = stats.get(task.status.value, 0) + 1
             return stats
 
@@ -1014,14 +1103,15 @@ class AnalysisTaskQueue:
     # ========== SSE 事件广播 ==========
     
     def subscribe(self, queue: 'AsyncQueue') -> None:
-        """
-        订阅任务事件
+        """订阅任务事件（**只接收当前租户**的任务事件）。
         
         Args:
             queue: asyncio.Queue 实例，用于接收事件
         """
+        # 在订阅时刻捕获身份：之后该连接只会收到属于这个租户的任务事件。
+        tenant_id, _owner_id = _capture_tenant_identity()
         with self._subscribers_lock:
-            self._subscribers.append(queue)
+            self._subscribers[queue] = tenant_id
             # 捕获当前事件循环（应在主线程的 async 上下文中调用）
             try:
                 self._main_loop = asyncio.get_running_loop()
@@ -1031,7 +1121,10 @@ class AnalysisTaskQueue:
                     self._main_loop = asyncio.get_event_loop()
                 except RuntimeError:
                     pass
-            logger.debug(f"[TaskQueue] 新订阅者加入，当前订阅者数: {len(self._subscribers)}")
+            logger.debug(
+                f"[TaskQueue] 新订阅者加入（tenant={tenant_id}），"
+                f"当前订阅者数: {len(self._subscribers)}"
+            )
     
     def unsubscribe(self, queue: 'AsyncQueue') -> None:
         """
@@ -1042,12 +1135,27 @@ class AnalysisTaskQueue:
         """
         with self._subscribers_lock:
             if queue in self._subscribers:
-                self._subscribers.remove(queue)
+                # dict.pop 带默认值：删掉后重复 unsubscribe 不会抛 KeyError。
+                self._subscribers.pop(queue, None)
                 logger.debug(f"[TaskQueue] 订阅者离开，当前订阅者数: {len(self._subscribers)}")
     
+    def _resolve_event_tenant(self, data: Dict[str, Any]) -> Optional[int]:
+        """从事件载荷反查其所属租户。
+
+        事件 ``data`` 统一由 ``TaskInfo.to_dict()`` 生成，含 ``task_id``，
+        因此可以在这里查回任务的归属，而不必给每个广播调用点加参数。
+        查不到任务（如已被淘汰/清理）时返回 ``None``。
+        """
+        task_id = data.get("task_id") if isinstance(data, dict) else None
+        if not task_id:
+            return None
+        with self._data_lock:
+            task = self._tasks.get(task_id)
+            return task.tenant_id if task is not None else None
+
     def _broadcast_event(self, event_type: str, data: Dict[str, Any]) -> None:
         """
-        广播事件到所有订阅者
+        广播事件到订阅者（**按租户隔离投递**）
         
         使用 call_soon_threadsafe 确保跨线程安全
         
@@ -1056,11 +1164,19 @@ class AnalysisTaskQueue:
             data: 事件数据
         """
         event = {"type": event_type, "data": data}
-        
+
+        event_tenant = self._resolve_event_tenant(data)
+
         with self._subscribers_lock:
-            subscribers = self._subscribers.copy()
+            # 只保留租户匹配的订阅者。dict 迭代期间不修改，先取快照。
+            subscribers = [
+                (queue, tenant)
+                for queue, tenant in self._subscribers.items()
+                if event_tenant is None and tenant is None
+                or (event_tenant is not None and tenant == event_tenant)
+            ]
             loop = self._main_loop
-        
+
         if not subscribers:
             return
         
@@ -1068,7 +1184,7 @@ class AnalysisTaskQueue:
             logger.warning("[TaskQueue] 无法广播事件：主事件循环未设置")
             return
         
-        for queue in subscribers:
+        for queue, _tenant in subscribers:
             try:
                 # 使用 call_soon_threadsafe 将事件放入 asyncio 队列
                 # 这是从工作线程向主事件循环发送消息的安全方式

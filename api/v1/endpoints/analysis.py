@@ -721,6 +721,26 @@ def trigger_market_review(
 # GET /tasks - 获取任务列表
 # ============================================================
 
+def _require_principal_in_multiuser():
+    """多租户模式下强制认证；单用户模式放行。
+
+    刻意不复用 ``src.tenancy.api.require_principal``：那个依赖**无条件**
+    抛 401，而本项目的单用户模式（``DSA_MULTIUSER_ENABLED`` 未开）下游
+    并没有登录体系，直接套用会让单用户部署的任务列表整体不可用。
+
+    多租户下这里必须拦：任务列表的隔离靠的是「入队时捕获身份 + 出列时
+    按身份过滤」，前提是**调用方身份真实可辨**。中间件虽然也会拦，但显式
+    依赖能让端点自身不依赖中间件配置是否正确。
+    """
+    from src.tenancy.context import multiuser_enabled
+
+    if not multiuser_enabled():
+        return None
+    from src.tenancy.api import require_principal
+
+    return require_principal()
+
+
 @router.get(
     "/tasks",
     response_model=TaskListResponse,
@@ -728,7 +748,7 @@ def trigger_market_review(
         200: {"description": "任务列表"},
     },
     summary="获取分析任务列表",
-    description="获取当前所有分析任务，可按状态筛选"
+    description="获取**当前用户**的分析任务，可按状态筛选（多租户下按租户隔离）"
 )
 def get_task_list(
     status: Optional[str] = Query(
@@ -736,6 +756,7 @@ def get_task_list(
         description="筛选状态：pending, processing, completed, failed, cancel_requested, cancelled（支持逗号分隔多个）"
     ),
     limit: int = Query(20, description="返回数量限制", ge=1, le=100),
+    _principal: Any = Depends(_require_principal_in_multiuser),
 ) -> TaskListResponse:
     """
     获取分析任务列表
@@ -803,9 +824,11 @@ def get_task_list(
         200: {"description": "SSE 事件流", "content": {"text/event-stream": {}}},
     },
     summary="任务状态 SSE 流",
-    description="通过 Server-Sent Events 实时推送任务状态变化"
+    description="通过 Server-Sent Events 实时推送**当前用户**的任务状态变化（多租户下按租户隔离）"
 )
-async def task_stream():
+async def task_stream(
+    _principal: Any = Depends(_require_principal_in_multiuser),
+):
     """
     SSE 任务状态流
     

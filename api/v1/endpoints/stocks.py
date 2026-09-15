@@ -394,6 +394,11 @@ def add_to_watchlist(
         if tenant_id is not None:
             from src.tenancy.settings import add_user_stock
 
+            # 多租户：只写该租户的个人列表。
+            # ⚠️ 不要同步写全局 STOCK_LIST —— 全局是进程级基础设施配置，
+            # 把各租户的写入并进去会让「全局值 = 所有用户股票的并集」，
+            # 任何读到全局的路径（未配置用户的兜底、分析流程回退）都会
+            # 变成跨租户泄漏。租户数据只留在 dsa_user_settings 里。
             res = add_user_stock(tenant_id, validated)
             codes = res.get("stock_codes") or []
             return WatchlistResponse(stock_codes=codes, message=f"已加入 {request.stock_code.strip()}")
@@ -435,6 +440,7 @@ def remove_from_watchlist(
         if tenant_id is not None:
             from src.tenancy.settings import remove_user_stock
 
+            # 多租户：只动该租户的个人列表，不碰全局 STOCK_LIST（原因见 add）。
             res = remove_user_stock(tenant_id, validated)
             codes = res.get("stock_codes") or []
             return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")

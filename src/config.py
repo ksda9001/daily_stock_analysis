@@ -3060,10 +3060,17 @@ class Config:
         return not origins.is_hermes_only
 
     def _tenant_stock_list(self) -> Optional[List[str]]:
-        """多租户：返回当前用户的自选股；无用户上下文或未配置时返回 ``None``。
+        """多租户：返回当前用户的自选股；**无用户上下文**时返回 ``None``。
 
-        这个方法本身不抛异常——配置读取失败应该回退到全局 ``.env``，
-        而不是让整轮分析失败。
+        返回值语义（调用方 :meth:`refresh_stock_list` 依赖它做区分）：
+        - ``None``：单用户模式，或当前没有用户上下文（如调度线程）→ 允许
+          调用方回退全局 ``.env``；
+        - ``[]``：多租户下该用户明确没有自选 → **不得回退全局**；
+        - 非空列表：该用户的自选。
+
+        ⚠️ 读取失败（异常）时返回 ``None`` 是**不安全**的：多租户下会退化成
+        读全局，而全局可能含其他租户的写入。因此这里记录 error 级别日志，
+        便于发现——正常情况下这条例外路径不应被触发。
         """
         try:
             from src.tenancy.context import current_user_id, multiuser_enabled
@@ -3071,9 +3078,21 @@ class Config:
 
             if not multiuser_enabled():
                 return None
-            return effective_stock_list(current_user_id())
-        except Exception as exc:  # noqa: BLE001 - 回退到全局配置
-            logger.warning("读取用户自选股失败，回退到全局 STOCK_LIST: %s", exc)
+            user_id = current_user_id()
+            if user_id is None:
+                # 有用户上下文缺失（如后台调度线程）时不做租户覆盖，
+                # 交由调用方按「无上下文」处理。
+                return None
+            own = effective_stock_list(user_id)
+            # 多租户下「没有个人配置」等价于「空自选」，不能返回 None，
+            # 否则调用方会回退全局 .env。
+            return [] if own is None else own
+        except Exception as exc:  # noqa: BLE001 - 保守回退到全局配置
+            logger.error(
+                "读取用户自选股失败，本次将回退到全局 STOCK_LIST（多租户下"
+                "请确认全局值不含其他租户数据）: %s",
+                exc,
+            )
             return None
 
     def refresh_stock_list(self) -> None:
@@ -3088,8 +3107,15 @@ class Config:
         ``dsa_user_settings`` 中配置的自选股，实现「每个用户一份自选股」。
         """
         # 多租户优先：用户在 WebUI 里维护的自选股覆盖全局 .env
+        #
+        # ⚠️ 这里用 ``is not None`` 而不是真值判断：多租户下「个人列表为空」
+        # 与「没有个人配置」必须区分对待，且**两者都不能回退全局 .env**。
+        # 全局 STOCK_LIST 是进程级基础设施配置，多租户环境中它可能包含其他
+        # 租户写入的代码（历史上 add/remove 会同步过去），一旦回退就会让
+        # 未配置用户的分析跑到别人的自选股上——这是 UI 之外更隐蔽的越权。
+        # 因此：已识别出用户上下文（返回值非 None）就用个人值，空就是空。
         tenant_list = self._tenant_stock_list()
-        if tenant_list:
+        if tenant_list is not None:
             self.stock_list = tenant_list
             return
 
