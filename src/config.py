@@ -1222,6 +1222,17 @@ class Config:
     )
     # 历史键：保留以便旧配置/旧代码继续可读，新代码读写 stock_push_times。
     push_times: List[str] = field(default_factory=lambda: list(DEFAULT_PUSH_TIMES))
+    # === CowAgent 推送通道 ===
+    # 到点把推送正文 POST 给 CowAgent，由它投递到用户微信（见
+    # src/notification_sender/cowagent_sender.py）。
+    #
+    # 为什么需要它：Server酱3 / 企业微信这类通道推的是「用户自己配的收件
+    # 地址」；而这里的目标是「用户在 CowAgent 里绑定的那个微信」，投递需要
+    # CowAgent 持有的 context_token（微信侧分配，DSA 拿不到也给不出）。
+    cowagent_base_url: str = "http://cowagent:9899"
+    # 与 CowAgent 的 external_api_token 同值。留空则整条通道停用 —— 宁可
+    # 不推，也不要在服务端未配置的情况下发请求。
+    cowagent_push_token: str = ""
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
     # 大盘复盘市场区域：cn(A股)、hk(港股)、us(美股)、jp(日股)、kr(韩股)、both(全部市场)
@@ -2224,6 +2235,22 @@ class Config:
                     prefer_env_file=True,
                 ),
                 fallback_time=MARKET_PUSH_TIMES_DEFAULT[0],
+            ),
+            cowagent_base_url=(
+                cls._resolve_env_value(
+                    'COWAGENT_BASE_URL',
+                    default='http://cowagent:9899',
+                    prefer_env_file=True,
+                )
+                or 'http://cowagent:9899'
+            ),
+            cowagent_push_token=(
+                cls._resolve_env_value(
+                    'COWAGENT_PUSH_TOKEN',
+                    default='',
+                    prefer_env_file=True,
+                )
+                or ''
             ),
             # 历史键：默认跟随自选股时刻，保证旧读取点拿到的是同一份值。
             push_times=normalize_schedule_times(

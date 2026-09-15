@@ -421,6 +421,43 @@ class RuntimeSchedulerService:
             logger.warning("[tenancy] failed to load fan-out targets: %s", exc)
             return []
 
+    def _register_push_schedules(self, scheduler) -> None:
+        """把两条推送时间线注册到调度器上。
+
+        用 ``add_daily_task``（具名任务）而不是 ``set_daily_task``：前者可以
+        有任意多组且不参与「重建每日调度」的流程，与按用户的个人时间表是同
+        一套机制。
+
+        两个入口分别注册，是为了让日志与失败排查能区分「自选股那张表没跑」
+        和「大盘那张表没跑」—— 两条时间线的到点判定互不相干。
+        """
+        try:
+            from src.config import get_config
+            from src.tenancy.settings import (
+                effective_market_push_times,
+                effective_push_times,
+            )
+            from src.services.push_dispatch import (
+                dispatch_market_pushes,
+                dispatch_stock_pushes,
+            )
+
+            stock_times = effective_push_times(None)
+            market_times = effective_market_push_times(None)
+
+            scheduler.add_daily_task(
+                dispatch_stock_pushes,
+                stock_times,
+                name="push-stock",
+            )
+            scheduler.add_daily_task(
+                dispatch_market_pushes,
+                market_times,
+                name="push-market",
+            )
+        except Exception as exc:  # noqa: BLE001 - 注册失败不应让分析调度也停掉
+            logger.warning("[push] failed to register push schedules: %s", exc)
+
     @staticmethod
     def _multiuser_active() -> bool:
         try:
@@ -788,6 +825,13 @@ class RuntimeSchedulerService:
             # ---- 按用户注册的个人时间表 ----
             if multiuser:
                 self._register_tenant_schedules(scheduler, generation)
+
+            # ---- 行情推送：两个定点时刻 ----
+            # 到点即推，**不是**轮询：每个时刻只注册一个 job，没有「隔几秒问
+            # 一次到点了没」的循环。到点判定全在 build_user_digest 里，读的是
+            # DSA 自己的时间表，因此用户改了自选股时间后下一次触发即生效，
+            # 不需要重建任何任务。
+            self._register_push_schedules(scheduler)
 
             for entry in background_tasks:
                 scheduler.add_background_task(

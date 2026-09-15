@@ -385,7 +385,7 @@ def fetch_watchlist_quotes(codes: List[str]) -> List[Dict[str, Any]]:
 #: 大盘复盘记录在 ``analysis_history`` 里的 ``code`` / ``report_type`` 约定值。
 MARKET_REVIEW_CODE = "MARKET"
 
-#: ``collect_report_text`` 的选段标记 —— 决定这次组装哪几半内容。
+#: ``collect_report_messages`` 的选段标记 —— 决定这次组装哪几半内容。
 #:
 #: 两条推送时间线各自需要不同的正文：大盘复盘只在收盘后有意义（数据定稿），
 #: 自选股研报则在开盘后就能看。用选段而不是「拿全量再裁掉一半」，是因为裁
@@ -489,28 +489,34 @@ def _render_record_markdown(record_id: int, scope_id: int) -> Optional[str]:
     return strip_hidden_markdown_metadata(text).strip()
 
 
-def collect_report_text(
+def collect_report_messages(
     tenant_id: int,
     codes: List[str],
     now: datetime,
     *,
     sections: Tuple[str, ...] = (SECTION_MARKET, SECTION_STOCKS),
-) -> str:
-    """收集该租户的推送正文：大盘复盘 + 各只自选股研报。
+) -> List[str]:
+    """收集该租户的推送正文，**一份报告一条消息**。
 
     组装顺序与读报习惯一致：**先大盘、后个股**。
 
-    ⚠️ **不做长度分页。** 微信渠道层 ``channel/weixin/weixin_channel.py``
-    已有 ``_split_text``（``TEXT_CHUNK_LIMIT`` = 4000），按
-    「段落 → 行 → 硬切」切分，段间还会 ``sleep(0.5)``。业务层再分一次
-    只会把表格从中间切断。
+    为什么返回列表而不是拼接后的大字符串
+    ------------------------------------
+    CowAgent 的微信渠道层 ``channel/weixin/weixin_channel.py`` 会按
+    ``_split_text``（``TEXT_CHUNK_LIMIT`` = 4000）把超长正文切片发送。
+    若业务层先把「大盘复盘 + N 只个股研报」拼成一个字符串，分片边界就可能
+    落在两份报告之间，用户收到的是一条消息的尾部与另一条消息的开头被切成
+    同一片 —— 排版错乱。
 
-    返回 ``""`` 表示该租户暂时没有任何可用报告，由调用方决定兜底。
+    改为逐条投递后，每份报告各自走一次分片，边界天然落在报告之间。
+    单份报告内部仍是交给渠道层切分（表格不会被业务层二次切割）。
+
+    返回 ``[]`` 表示该租户暂时没有任何可用报告，由调用方决定兜底。
     """
     from src.tenancy.context import SHARED_TENANT_ID
 
     since = now - timedelta(hours=REPORT_MAX_AGE_HOURS)
-    parts: List[str] = []
+    messages: List[str] = []
 
     # 大盘复盘：共享内容，不按租户过滤。
     if SECTION_MARKET in sections:
@@ -520,7 +526,7 @@ def collect_report_text(
         if review_id is not None:
             review = _render_record_markdown(review_id, SHARED_TENANT_ID)
             if review:
-                parts.append(review)
+                messages.append(review)
         else:
             logger.info(
                 "[push] tenant %s: no market review within %sh",
@@ -542,12 +548,9 @@ def collect_report_text(
                 continue
             body = _render_record_markdown(record_id, int(tenant_id))
             if body:
-                parts.append(body)
+                messages.append(body)
 
-    if not parts:
-        return ""
-
-    return "\n\n---\n\n".join(parts)
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -765,12 +768,12 @@ def build_user_digest(
     #
     # ⚠️ 只读 analysis_history，**不在这里跑分析**：完整分析个股约 105 秒/只，
     # 09:35 这个时段来不及。报告由 runtime_scheduler 的租户 fan-out 预先产出。
-    report_text = collect_report_text(
+    report_messages = collect_report_messages(
         tenant_id, codes, moment, sections=tuple(parts)
     )
 
     watchlist_ok = [item for item in watchlist if item.get("ok")]
-    if not report_text and not indices and not watchlist_ok:
+    if not report_messages and not indices and not watchlist_ok:
         # 三条数据线都空 → 推出去只是一条「什么都拿不到」的噪声。
         # 刻意**不**写去重标记，让同一个时段内的下一次轮询还能重试。
         logger.warning("[push] user %s: no data available, skipping this slot", tenant_id)
@@ -782,14 +785,17 @@ def build_user_digest(
             "message": "行情与研报数据源暂不可用，本次不推送",
         }
 
-    # 有报告就用报告；报告缺失时才退回实时行情，避免推出一条空消息。
-    text = report_text or render_digest(
-        slot=slot,
-        indices=indices,
-        watchlist=watchlist,
-        watchlist_source=str(stock_view.get("source") or ""),
-        now=moment,
-    )
+    # 有报告就逐条推报告；报告缺失时才退回实时行情，避免推出一条空消息。
+    # 兜底行情只有一条，因此仍然走单条路径。
+    messages = report_messages or [
+        render_digest(
+            slot=slot,
+            indices=indices,
+            watchlist=watchlist,
+            watchlist_source=str(stock_view.get("source") or ""),
+            now=moment,
+        )
+    ]
 
     if not force:
         # 只标记**本次真的推过**的时段。把两边都标上会让另一条时间线在
@@ -801,13 +807,13 @@ def build_user_digest(
             mark_sent(tenant_id, market_slot, moment)
 
     logger.info(
-        "[push] user %s slot=%s report=%d indices=%d watchlist=%d text_len=%d",
+        "[push] user %s slot=%s messages=%d chars=%s indices=%d watchlist=%d",
         tenant_id,
         slot or "-",
-        len(report_text),
+        len(messages),
+        [len(m) for m in messages],
         len(indices),
         len(watchlist_ok),
-        len(text),
     )
 
     return {
@@ -822,5 +828,7 @@ def build_user_digest(
         "watchlist": watchlist,
         "stock_codes": codes,
         "stock_list_source": stock_view.get("source"),
-        "text": text,
+        "messages": messages,
+        # 兼容旧调用方：合并视图，仅供日志/调试，投递请用 messages。
+        "text": "\n\n---\n\n".join(messages),
     }
